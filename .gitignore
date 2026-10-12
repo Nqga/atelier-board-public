@@ -1,0 +1,13 @@
+node_modules/
+*.tar
+*.log
+.DS_Store
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+.env.*
+!.env.example
+test-results/
+.openai/

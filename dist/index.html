@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ed3269">
+  <meta name="description" content="Atelier : votre espace visuel pour réfléchir, organiser et donner vie aux idées. Un Board libre avec post-it, formes, connexions et votes.">
+  <title>Atelier — Les idées prennent leur place</title>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./collaboration-ui.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <button class="brand" id="homeButton" aria-label="Ouvrir mes tableaux"><svg width="31" height="33" viewBox="0 0 31 33" fill="none"><path d="M5 25 15 5l11 20M9 18h14" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="26" cy="5" r="3" fill="currentColor"/></svg><span>atelier<span class="brand-dot">.</span></span></button>
+      <div class="header-divider"></div>
+      <div class="breadcrumb"><span>Mon espace</span><span class="crumb-arrow">/</span><button id="boardTitle" class="title-button" title="Renommer le tableau">Brainstorming produit</button><span class="board-badge">BOARD</span></div>
+      <div class="topbar-actions">
+        <div class="participants" id="participants" aria-label="Participants présents" hidden></div>
+        <span class="project-mode" id="projectMode">Local</span>
+        <span class="save-status" id="saveStatus"><span></span>Enregistré</span>
+        <button class="avatar" id="profileButton" title="Votre profil">VO</button>
+        <button class="icon-button invite-button" id="inviteButton" aria-label="Inviter des participants" data-icon="userPlus"></button>
+        <span class="header-divider small"></span>
+        <button class="button subtle present-button" id="presentButton"><span data-icon="play"></span><span>Présenter</span></button>
+        <button class="button primary" id="shareButton"><span data-icon="share"></span><span>Partager</span></button>
+      </div>
+    </header>
+    <aside class="sidebar" id="sidebar">
+      <div class="workspace-switch"><div class="workspace-icon">A</div><div><strong>Mon espace créatif</strong><span>Espace personnel</span></div><span data-icon="chevronDown"></span></div>
+      <button class="button new-board" id="newBoardButton"><span data-icon="plus"></span>Créer un tableau</button>
+      <nav class="main-nav" aria-label="Navigation principale">
+        <button class="nav-item active" id="boardsButton"><span data-icon="boards"></span>Mes tableaux<span class="nav-count" id="boardCount">1</span></button>
+        <button class="nav-item" id="templatesButton"><span data-icon="grid"></span>Modèles<span class="new-label">4</span></button>
+        <button class="nav-item" id="importButton"><span data-icon="upload"></span>Importer un tableau</button>
+      </nav>
+      <div class="sidebar-section-title"><span>DANS CE TABLEAU</span><button class="icon-button tiny" id="searchButton" aria-label="Rechercher dans le tableau" data-icon="search"></button></div>
+      <div class="board-outline" id="boardOutline"></div>
+      <div class="sidebar-divider"></div>
+      <button class="nav-item" id="votesButton"><span data-icon="thumbsUp"></span>Voter sur les idées<span class="nav-count" id="voteCount">0</span></button>
+      <button class="nav-item" id="timerButton"><span data-icon="timer"></span>Minuteur<span id="sidebarTimer" class="nav-count"></span></button>
+      <div class="sidebar-bottom"><div class="tip-card"><span class="tip-icon" data-icon="sparkles"></span><strong>Place aux idées.</strong><p>Un espace sans limites pour voir les choses autrement.</p><button id="tipsButton">Découvrir les raccourcis <span>↗</span></button><div class="tip-art"><i></i><i></i><i></i></div></div><button class="help-button" id="helpButton"><span data-icon="help"></span>Aide et raccourcis<span>?</span></button></div>
+    </aside>
+    <main class="board-area" id="boardArea" aria-label="Tableau visuel, utilisez la barre d’outils pour ajouter des éléments" tabindex="0">
+      <div id="world" class="world"><svg id="connections" class="connections" width="1" height="1" overflow="visible"><defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#65717b"/></marker></defs><g id="paths"></g></svg><div id="objects"></div><div id="remoteCursors" class="remote-cursors" aria-hidden="true"></div></div>
+      <div class="canvas-top"><button class="icon-button surface sidebar-toggle" id="sidebarToggle" aria-label="Afficher ou masquer le panneau" data-icon="panel"></button><span class="canvas-label"><span class="live-dot"></span>Un grand espace pour vos idées</span><button class="icon-button surface" id="moreButton" aria-label="Options du tableau" data-icon="more"></button></div>
+      <div class="floating-toolbar" role="toolbar" aria-label="Outils du tableau">
+        <button class="tool active" data-tool="select" data-tooltip="Sélectionner · V" aria-label="Sélectionner" data-icon="cursor"></button>
+        <button class="tool" data-tool="hand" data-tooltip="Déplacer · H / Espace" aria-label="Déplacer le tableau" data-icon="hand"></button>
+        <div class="tool-divider"></div>
+        <button class="tool" data-tool="note" data-tooltip="Post-it · N" aria-label="Ajouter un post-it" data-icon="note"></button>
+        <button class="tool" data-tool="text" data-tooltip="Texte · T" aria-label="Ajouter du texte" data-icon="text"></button>
+        <button class="tool" data-tool="shape" data-tooltip="Forme · S" aria-label="Ajouter une forme" data-icon="shapes"></button>
+        <button class="tool" data-tool="connector" data-tooltip="Relier deux idées · L" aria-label="Relier deux éléments" data-icon="connector"></button>
+        <button class="tool" data-tool="draw" data-tooltip="Dessiner · D" aria-label="Dessiner" data-icon="pen"></button>
+        <button class="tool" data-tool="image" data-tooltip="Image · I" aria-label="Ajouter une image" data-icon="image"></button>
+        <div class="tool-divider"></div>
+        <button class="tool" data-tool="frame" data-tooltip="Créer une zone · F" aria-label="Créer une zone" data-icon="frame"></button>
+      </div>
+      <div id="inspector" class="inspector" hidden></div>
+      <div class="canvas-bottom-left"><div class="history-controls surface"><button class="icon-button" id="undoButton" aria-label="Annuler" title="Annuler · Ctrl+Z" data-icon="undo"></button><button class="icon-button" id="redoButton" aria-label="Rétablir" title="Rétablir · Ctrl+Maj+Z" data-icon="redo"></button></div><button class="hint-pill" id="hintButton"><span data-icon="mouse"></span>Double-cliquez pour ajouter une idée</button></div>
+      <div class="canvas-bottom-right"><div class="minimap surface" id="minimap" title="Cliquer pour naviguer"><canvas id="minimapCanvas" width="360" height="200"></canvas><span>VUE D’ENSEMBLE</span></div><div class="zoom-controls surface"><button class="icon-button" id="zoomOut" aria-label="Dézoomer" data-icon="minus"></button><button id="zoomValue" title="Revenir à 100 %">100 %</button><button class="icon-button" id="zoomIn" aria-label="Zoomer" data-icon="plus"></button><div></div><button class="icon-button" id="fitButton" aria-label="Voir tout le tableau" title="Ajuster à l’écran · Maj+1" data-icon="fit"></button></div></div>
+      <div class="mode-banner" id="modeBanner" hidden></div>
+      <button class="button surface exit-present" id="exitPresent" hidden><span data-icon="close"></span>Quitter la présentation</button>
+      <div class="timer-widget surface" id="timerWidget" hidden></div>
+    </main>
+  </div>
+  <dialog id="dialog"><div id="dialogContent"></div></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <input id="fileInput" type="file" accept="application/json,.json" hidden>
+  <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+node_modules
+.git
+.openai
+data
+.env
+.env.*
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+tests
+test-results
