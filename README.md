@@ -36,7 +36,11 @@ Les projets partagés utilisent Yjs : les modifications indépendantes se combin
 
 Un tableau déjà ouvert reste éditable pendant une coupure réseau. Le navigateur conserve un brouillon de récupération dans IndexedDB et renvoie les changements à la reconnexion. L'interface distingue les changements en attente de ceux confirmés après stockage par le serveur. Une copie en cache n'est pas une confirmation de sauvegarde distante. L'ouverture initiale et le rechargement de l'application nécessitent le serveur ; cette V2 n'installe pas de service worker.
 
-Le brouillon est associé au projet et à l'identité du visiteur : sa récupération suppose le même cookie et un stockage navigateur disponible. Une erreur temporaire de sauvegarde ou une limite de fréquence entraîne une nouvelle tentative automatique avec un délai progressif. Si l'accès est retiré ou si une modification est définitivement refusée, le client conserve une copie de récupération et arrête les envois. Utiliser **Récupérer ma copie locale**, puis **Exporter ma copie locale**, pour conserver un JSON à importer dans un tableau local. Les invités utilisent le même serveur que le propriétaire : démarrer l'application séparément sur plusieurs machines ne relie pas leurs projets.
+Le brouillon est associé au projet et à l'identité du visiteur : sa récupération suppose le même cookie et un stockage navigateur disponible. Une erreur temporaire de sauvegarde ou une limite de fréquence entraîne une nouvelle tentative automatique avec un délai progressif.
+
+Si un quota de stockage est atteint, le client conserve le brouillon sans le déclarer synchronisé et suspend l'édition et les renvois automatiques. Libérer de la capacité, puis utiliser **Réessayer la synchronisation** ; les droits sont vérifiés à nouveau. Si l'accès est retiré ou si une modification est définitivement refusée, le client conserve une copie de récupération et arrête les envois. Utiliser **Récupérer ma copie locale**, puis **Exporter ma copie locale**, pour conserver un JSON à importer dans un tableau local, y compris lorsqu'un quota bloque la sauvegarde.
+
+Les invités utilisent le même serveur que le propriétaire : démarrer l'application séparément sur plusieurs machines ne relie pas leurs projets.
 
 L'export de récupération embarque les images encore accessibles. Quand une image privée ne peut plus être lue, il conserve sa position sous forme d'un texte **Image à réajouter** et garde son ancienne référence dans les métadonnées. Le JSON reste importable ; cette référence ne donne aucun accès à l'image d'origine. Avec le même cookie et le stockage navigateur conservé, rouvrir le lien du projet après un retrait d'accès permet aussi d'exporter la copie locale en lecture seule ; aucun changement n'est renvoyé au serveur.
 
@@ -74,6 +78,11 @@ Configurer `TRUST_PROXY=1` uniquement quand l'application est accessible au trav
 | `DATA_DIR` | Répertoire persistant des données SQLite et images des projets, `./data` par défaut. |
 | `PUBLIC_URL` | Origine publique utilisée pour les invitations et le contrôle d'origine, par exemple `https://board.example.com`. |
 | `TRUST_PROXY` | `1` ou `true` derrière un proxy HTTPS de confiance ; `0` en accès HTTP local. |
+| `MAX_BOARDS_PER_GUEST` | Nombre maximal de projets créés et encore stockés par identité invitée, `20` par défaut. Rejoindre un projet ne consomme pas ce quota. |
+| `MAX_BOARD_STORAGE_MB` | Limite de données par projet : état Yjs complet et fichiers d'images, `100` par défaut. |
+| `MAX_TOTAL_STORAGE_MB` | Limite de ces données pour toute l'installation, `1024` par défaut. |
+
+Les quotas sont des entiers strictement positifs. Pour les deux variables de stockage, une unité vaut **1 048 576 octets (1 Mio)** : les valeurs par défaut sont donc 100 Mio par projet et 1 Gio pour l'installation. Une configuration invalide empêche le démarrage du serveur.
 
 Une recette Docker est fournie dans [Dockerfile](Dockerfile) et [docker-compose.yml](docker-compose.yml). Le volume `atelier-data` conserve les données après un redémarrage ou une recréation du conteneur. Les fichiers `.env` ne sont pas ajoutés à Git. Node ne les charge pas automatiquement : les passer via l'environnement du processus ou utiliser l'option Node `--env-file` ; Docker Compose lit `.env` pour ses substitutions.
 
@@ -86,7 +95,17 @@ La recette publie le port sur `127.0.0.1` pour un accès local ou un proxy insta
 
 Cette version utilise **une seule instance serveur**. Ne pas lancer plusieurs réplicas partageant le même fichier SQLite : leurs connexions WebSocket et documents en mémoire ne se synchronisent pas entre processus. Prévoir une architecture de coordination et de stockage adaptée avant une montée en charge horizontale.
 
-Tout visiteur peut créer une identité invitée, puis ses propres projets et leurs images. Le serveur limite la taille des documents et des fichiers ainsi que la fréquence des requêtes, mais cette version ne fixe pas de quota total de stockage par visiteur ou pour l'installation. Avant de proposer un service ouvert au grand public, ajouter des quotas de stockage et une gestion des abus adaptés à l'usage prévu.
+## Quotas de stockage
+
+Le serveur applique les quotas aux créations de projets, aux images et aux modifications synchronisées avant de les accepter. Un dépassement ne produit ni sauvegarde confirmée ni diffusion aux autres participants. La limite de projets reste liée au créateur d'origine : ajouter un autre propriétaire ou retirer ses droits ne transfère pas son quota.
+
+Une image importée reste comptée après la suppression de son élément du tableau, afin que l'annulation puisse la restaurer. Supprimer le projet libère son état Yjs ; la capacité de ses images est libérée lorsque leur suppression sur disque réussit. Les fichiers restants après un échec sont conservés dans le comptage et leur nettoyage est retenté au prochain démarrage.
+
+Si l'administrateur réduit les quotas, aucun projet existant n'est supprimé : les lectures, les suppressions et les modifications qui n'augmentent pas les données mesurées restent possibles.
+
+Ces quotas mesurent l'état Yjs et les fichiers d'images, pas toute l'occupation du disque : les métadonnées, les journaux SQLite et l'espace physique de la base sont distincts. Une suppression ne réduit pas nécessairement la taille physique de SQLite. Prévoir une limite et une surveillance du disque chez l'hébergeur.
+
+Tout visiteur peut créer une nouvelle identité invitée. Effacer ses cookies ou utiliser un autre navigateur contourne donc la limite par identité ; le quota global de l'installation reste appliqué. Ces limites ne remplacent pas une gestion des abus ou une protection contre le déni de service pour un service ouvert au grand public.
 
 Pour sauvegarder une installation, arrêter proprement le serveur puis copier **tout le répertoire `DATA_DIR`**, qui contient `atelier.sqlite` et le répertoire `assets/`. Restaurer ce répertoire avant de redémarrer. Le cache des navigateurs ne remplace pas cette sauvegarde.
 

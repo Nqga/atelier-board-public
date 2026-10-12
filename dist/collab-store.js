@@ -116,7 +116,8 @@ export class CollaborativeBoardStore {
     this.reconnectMin = options.reconnectMin ?? 600; this.reconnectMax = options.reconnectMax ?? 15000;
     this.listeners = new Set(); this.statusListeners = new Set(); this.presenceListeners = new Set(); this.beforeRemoteListeners = new Set();
     this.pending = new Map(); this.queue = []; this.hasPending = false; this.lastSaved = false; this.cacheSaved = false;
-    this.status = 'connecting'; this.error = null; this.users = []; this.presence = { cursor: null, selection: [], editing: null };
+    this.status = 'connecting'; this.error = null; this.errorCode = null; this.users = []; this.presence = { cursor: null, selection: [], editing: null };
+    this._quotaDrafts = []; this._retainedRecoveries = []; this._quotaRetrying = false;
     this.destroyed = false; this.ready = false; this.rejected = false; this.restoredPending = false; this.reconnectAttempts = 0;
     this.socket = null; this._cacheChain = Promise.resolve(); this._cacheGeneration = 0; this._label = ''; this._source = 'local'; this._batchDepth = 0;
     this._remotePauseDepth = 0; this._remoteQueue = [];
@@ -126,6 +127,7 @@ export class CollaborativeBoardStore {
   }
   get board() { return boardFromDoc(this.doc, this.id, { updatedAt: this.updatedAt }); }
   get canEdit() { return !this.destroyed && !this.rejected && ['owner', 'editor'].includes(this.role); }
+  get canRetry() { return !this.destroyed && !this.recoveryOnly && this.rejected && this.errorCode === 'QUOTA_EXCEEDED' && ['owner', 'editor'].includes(this.role) && (this._quotaDrafts.length > 0 || !this.hasPending); }
   get canUndo() { return this.canEdit && this.undoManager.undoStack.length > 0; }
   get canRedo() { return this.canEdit && this.undoManager.redoStack.length > 0; }
   subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
@@ -143,7 +145,7 @@ export class CollaborativeBoardStore {
     }
     if (this.ready && !this.rejected) this._setStatus(this.role === 'viewer' ? 'readonly' : this.lastSaved ? 'synced' : 'syncing');
   }
-  _statusInfo() { return { status: this.status, hasPending: this.hasPending, lastSaved: this.lastSaved, cacheSaved: this.cacheSaved, role: this.role, canEdit: this.canEdit, revision: this.revision, error: this.error }; }
+  _statusInfo() { return { status: this.status, hasPending: this.hasPending, lastSaved: this.lastSaved, cacheSaved: this.cacheSaved, role: this.role, canEdit: this.canEdit, canRetry: this.canRetry, errorCode: this.errorCode, revision: this.revision, error: this.error }; }
   _emitStatus() { callListeners(this.statusListeners, this._statusInfo()); }
   _setStatus(status, error = this.error) { this.status = status; this.error = error; this._emitStatus(); }
   _assertEditable() { if (!this.canEdit) throw new Error(this.rejected ? 'Modifications suspendues : votre copie locale reste récupérable.' : 'Ce projet est en lecture seule.'); }
@@ -154,10 +156,11 @@ export class CollaborativeBoardStore {
       this.recoveryDraft = await this.cache.get(this.recoveryKey) || undefined;
       [cached, slots, recoverySlots] = await Promise.all([this.cache.get(this.cacheKey), this.cache.list?.(this.pendingPrefix) || [], this.cache.list?.(this.recoveryPrefix) || []]);
     } catch { return; }
-    const entries = [...(cached?.state ? [{ key: this.cacheKey, value: cached }] : []), ...slots.filter(entry => entry.value?.state), ...recoverySlots.filter(entry => entry.value?.state)];
+    const entries = [...(cached?.state ? [{ key: this.cacheKey, value: cached }] : []), ...slots.filter(entry => entry.value?.state), ...recoverySlots.filter(entry => entry.value?.state), ...(this.recoveryDraft?.state ? [{ key: this.recoveryKey, value: this.recoveryDraft }] : [])];
     if (!entries.length) return;
     const authoritative = new Y.Doc(), candidate = new Y.Doc();
-    const obsolete = [], quarantine = [];
+    const obsolete = [], quarantine = [], permanentRefusals = [];
+    let cachedNeedsRecovery = false;
     try {
       const serverState = Y.encodeStateAsUpdate(this.doc);
       Y.applyUpdate(authoritative, serverState); Y.applyUpdate(candidate, serverState);
@@ -165,27 +168,52 @@ export class CollaborativeBoardStore {
       for (const entry of entries) {
         const update = decodeBase64(entry.value.state);
         const slotDoc = new Y.Doc();
-        let covered;
-        try { Y.applyUpdate(slotDoc, update); boardFromDoc(slotDoc, this.id); covered = coveredByServer(slotDoc, authoritative); }
-        finally { slotDoc.destroy(); }
+        let covered, retained = false;
+        try {
+          Y.applyUpdate(slotDoc, update); boardFromDoc(slotDoc, this.id); covered = coveredByServer(slotDoc, authoritative);
+          if (entry.key === this.cacheKey) cachedNeedsRecovery = !covered;
+          if (entry.value.rejected && entry.value.errorCode !== 'QUOTA_EXCEEDED' && !entry.value.mixedRecovery) {
+            permanentRefusals.push({ doc: slotDoc, code: entry.value.errorCode || null }); retained = true;
+          }
+        } finally { if (!retained) slotDoc.destroy(); }
         if (covered && entry.key.startsWith(this.pendingPrefix)) obsolete.push(entry);
-        const quarantined = entry.key.startsWith(this.recoveryPrefix);
+        const quarantined = entry.key === this.recoveryKey || entry.key.startsWith(this.recoveryPrefix);
         if (!covered && (this.role === 'viewer' || entry.value.rejected || quarantined)) {
           recover.push(entry.value);
+          // Keep each refused snapshot's cause: a combined export can include an
+          // older unauthorized draft and must never make it eligible for retry.
+          if (entry.value.rejected && entry.value.errorCode === 'QUOTA_EXCEEDED') this._quotaDrafts.push(clone(entry));
           if (entry.key.startsWith(this.pendingPrefix)) quarantine.push(entry);
         } else if (!quarantined && this.role !== 'viewer' && !entry.value.rejected) Y.applyUpdate(candidate, update);
       }
+      // An explicit retry may subsequently be refused for access or schema.
+      // Older quota-tagged copies of that same state must not revive its retry.
+      let quotaBlockedCode = null;
+      this._quotaDrafts = this._quotaDrafts.filter(entry => {
+        const draft = new Y.Doc();
+        try {
+          Y.applyUpdate(draft, decodeBase64(entry.value.state));
+          const refusal = permanentRefusals.find(value => coveredByServer(draft, value.doc));
+          if (refusal) { quotaBlockedCode = refusal.code; return false; }
+          return true;
+        } finally { draft.destroy(); }
+      });
       if (recover.length) {
         const recoveryDoc = new Y.Doc();
         try {
           Y.applyUpdate(recoveryDoc, serverState);
           for (const value of recover) Y.applyUpdate(recoveryDoc, decodeBase64(value.state));
-          this.recoveryDraft = { ...recover.at(-1), state: encodeBase64(Y.encodeStateAsUpdate(recoveryDoc)), board: boardFromDoc(recoveryDoc, this.id), hasPending: true };
+          const causes = new Set(recover.map(value => value.rejected ? value.errorCode || 'PERMANENT_REFUSAL' : 'UNSENT'));
+          this.recoveryDraft = { ...recover.at(-1), state: encodeBase64(Y.encodeStateAsUpdate(recoveryDoc)), board: boardFromDoc(recoveryDoc, this.id), hasPending: true, mixedRecovery: causes.size > 1 || recover.some(value => value.mixedRecovery), errorCode: recover.every(value => value.rejected && value.errorCode === 'QUOTA_EXCEEDED') ? 'QUOTA_EXCEEDED' : null };
         } finally { recoveryDoc.destroy(); }
       }
       // Existing refused drafts remain recoverable; other tab slots are retained.
-      if (cached?.hasPending && cached.rejected && this.role !== 'viewer' && recover.length) {
-        this.rejected = true; this.hasPending = true; this._setStatus('error', cached.error || 'Une copie locale refusée est disponible à récupérer.');
+      if (cached?.hasPending && cached.rejected && cachedNeedsRecovery && this.role !== 'viewer' && recover.length) {
+        this.rejected = true; this.hasPending = true; this.errorCode = cached.errorCode === 'QUOTA_EXCEEDED' && !this._quotaDrafts.length ? quotaBlockedCode : cached.errorCode || null;
+        this._setStatus(this.errorCode === 'QUOTA_EXCEEDED' ? 'quota' : 'error', cached.error || 'Une copie locale refusée est disponible à récupérer.');
+      } else if (this._quotaDrafts.length && this.role !== 'viewer') {
+        this.rejected = true; this.hasPending = true; this.errorCode = 'QUOTA_EXCEEDED';
+        this._setStatus('quota', 'Le quota de stockage a suspendu la sauvegarde. Votre brouillon est conservé ; vous pouvez réessayer après avoir libéré de la place.');
       }
       boardFromDoc(candidate, this.id, { updatedAt: this.updatedAt });
       this.hasPending = this.restoredPending = this.rejected || (this.role !== 'viewer' && !coveredByServer(candidate, authoritative));
@@ -194,12 +222,13 @@ export class CollaborativeBoardStore {
       // Quarantined drafts stay recoverable and are never silently re-uploaded.
       for (const entry of quarantine) {
         const key = this.recoveryPrefix + entry.key.slice(this.pendingPrefix.length);
+        for (const quota of this._quotaDrafts) if (quota.key === entry.key) quota.key = key;
         if ((await this.cache.set(key, entry.value)) !== false) await this.cache.deleteIfUnchanged?.(entry.key, entry.value);
       }
       // Only the server can prove a previous tab's pending slot no longer matters.
       for (const entry of obsolete) await this.cache.deleteIfUnchanged?.(entry.key, entry.value);
     } catch { this.recoveryDraft ||= cached || slots[0]?.value; }
-    finally { candidate.destroy(); authoritative.destroy(); }
+    finally { candidate.destroy(); authoritative.destroy(); for (const refusal of permanentRefusals) refusal.doc.destroy(); }
   }
   _observe() {
     this._updateHandler = (update, origin) => {
@@ -218,18 +247,31 @@ export class CollaborativeBoardStore {
   _persist() {
     if (!this.cache) { this.cacheSaved = false; return Promise.resolve(false); }
     // Capture now, then serialize writes so an older snapshot never wins a race.
-    const snapshot = this.recoveryDraft && this.rejected ? this.recoveryDraft : {
+    let snapshot = this.recoveryDraft && this.rejected ? this.recoveryDraft : {
       version: 2, state: encodeBase64(Y.encodeStateAsUpdate(this.doc)), hasPending: this.hasPending,
-      rejected: this.rejected, error: this.error, revision: this.revision, updatedAt: this.updatedAt,
+      rejected: this.rejected, error: this.error, errorCode: this.errorCode, revision: this.revision, updatedAt: this.updatedAt,
     };
+    if (this.rejected && this.errorCode === 'QUOTA_EXCEEDED') {
+      // The exportable recovery may also contain a different tab's permanent
+      // refusal. Persist only quota-eligible changes as this tab's retry state.
+      const retryDoc = new Y.Doc();
+      try {
+        Y.applyUpdate(retryDoc, Y.encodeStateAsUpdate(this.doc));
+        for (const entry of this._quotaDrafts) Y.applyUpdate(retryDoc, decodeBase64(entry.value.state));
+        boardFromDoc(retryDoc, this.id);
+        snapshot = { version: 2, state: encodeBase64(Y.encodeStateAsUpdate(retryDoc)), hasPending: this.hasPending, rejected: true, error: this.error, errorCode: this.errorCode, revision: this.revision, updatedAt: this.updatedAt };
+      } finally { retryDoc.destroy(); }
+    }
     const generation = ++this._cacheGeneration;
     const recovery = this.recoveryDraft ? clone(this.recoveryDraft) : null;
+    const retainedRecoveries = clone(this._retainedRecoveries);
     const pendingSnapshot = this.hasPending ? snapshot : null;
     this.cacheSaved = false; this._emitStatus();
     this._cacheChain = this._cacheChain.catch(() => false).then(async () => {
       let saved = false;
       try {
         // Keep recovery separate: later promotion and ACKs cannot overwrite it.
+        for (const entry of retainedRecoveries) if ((await this.cache.set(entry.key, entry.value)) === false) throw new Error('Cache de récupération indisponible.');
         if (recovery && (await this.cache.set(this.recoveryKey, recovery)) === false) throw new Error('Cache de récupération indisponible.');
         // Each tab owns its pending slot; another tab's latest snapshot cannot
         // erase offline edits. ACKs only remove the current tab's own slot.
@@ -260,7 +302,7 @@ export class CollaborativeBoardStore {
       if (this.socket !== socket) return;
       this.socket = null; this.ready = false; this.lastSaved = false; clearTimeout(this._ackTimer); this._ackTimer = null;
       if (this.destroyed) return;
-      if (event.code === 1008) { this._reject(event.reason || 'Votre accès au projet a été retiré.', 'denied'); return; }
+      if (event.code === 1008) { this._reject(event.reason || 'Votre accès au projet a été retiré.', 'denied', 'FORBIDDEN'); return; }
       if (!this.rejected) { this._setStatus('offline'); this._reconnect(); }
     });
     listen('error', () => { if (this.socket === socket && !this.ready) this._setStatus('offline', 'Connexion au serveur interrompue.'); });
@@ -308,6 +350,12 @@ export class CollaborativeBoardStore {
     }
     if (message.type === 'sync') {
       if (!['owner', 'editor', 'viewer'].includes(message.role)) throw new Error('Autorisation de projet invalide.');
+      if (this.rejected) {
+        // An IME buffer can hold an older handshake when an immediate refusal
+        // ends editing. Merge its state without reopening or resending a draft.
+        this._applyRemote(message.state);
+        return;
+      }
       this.role = message.role; this.revision = message.revision || 0; this.updatedAt = message.updatedAt || this.updatedAt;
       this._applyRemote(message.state);
       this.users = Array.isArray(message.users) ? clone(message.users) : [];
@@ -315,7 +363,7 @@ export class CollaborativeBoardStore {
       clearTimeout(this._handshakeTimer); this._handshakeTimer = null; this.ready = true;
       this.pending.clear(); this.queue = []; clearTimeout(this._flushTimer); this._flushTimer = null; clearTimeout(this._ackTimer); this._ackTimer = null;
       if (this.role === 'viewer') {
-        if (this.hasPending) { this._reject('Votre accès est désormais en lecture seule ; votre copie locale est conservée.', 'readonly'); return; }
+        if (this.hasPending) { this._reject('Votre accès est désormais en lecture seule ; votre copie locale est conservée.', 'readonly', 'READ_ONLY'); return; }
         this.lastSaved = false; this._setStatus('readonly', null); this._persist();
       } else {
         const missing = this.hasPending ? Y.encodeStateAsUpdate(this.doc, decodeBase64(message.vector)) : noopUpdate();
@@ -331,6 +379,7 @@ export class CollaborativeBoardStore {
       this.revision = Math.max(this.revision, message.revision || 0); this.updatedAt = message.updatedAt || this.updatedAt;
       this.hasPending = this.pending.size > 0 || this.queue.length > 0 || this.restoredPending;
       this.lastSaved = !this.hasPending && !this.rejected;
+      if (this.lastSaved && this._quotaRetrying) { this._quotaRetrying = false; this._quotaDrafts = []; }
       // A transport handshake alone does not mean persistence has recovered.
       this.reconnectAttempts = 0;
       this._setStatus(this.role === 'viewer' ? 'readonly' : this.lastSaved && !this._remoteQueue.length ? 'synced' : 'syncing', null);
@@ -341,7 +390,7 @@ export class CollaborativeBoardStore {
       if (!['owner', 'editor', 'viewer'].includes(message.role)) throw new Error('Autorisation de projet invalide.');
       this.role = message.role;
       if (this.role === 'viewer') {
-        if (this.hasPending) this._reject('Votre accès est désormais en lecture seule ; votre copie locale est conservée.', 'readonly');
+        if (this.hasPending) this._reject('Votre accès est désormais en lecture seule ; votre copie locale est conservée.', 'readonly', 'READ_ONLY');
         else this._setStatus('readonly');
       } else if (this.ready && !this.rejected) {
         this._setStatus('syncing', null);
@@ -352,10 +401,12 @@ export class CollaborativeBoardStore {
         this.hasPending = this.hasPending || this.queue.length > 0 || this.pending.size > 0;
         this._persist();
         this._disconnectForRetry(message.message || 'Le serveur est temporairement indisponible ; votre travail reste conservé.');
+      } else if (message.code === 'QUOTA_EXCEEDED') {
+        this._reject(message.message || 'Le quota de stockage est atteint. Votre brouillon est conservé.', 'quota', message.code);
       } else if (message.code === 'READ_ONLY') {
         this.role = 'viewer';
-        this._reject(message.message || 'Votre accès est désormais en lecture seule.', 'readonly');
-      } else this._reject(message.message || 'Le serveur a refusé les modifications.', /forbidden|revoked|unauthorized|denied|session_required/i.test(message.code || '') ? 'denied' : 'error');
+        this._reject(message.message || 'Votre accès est désormais en lecture seule.', 'readonly', message.code);
+      } else this._reject(message.message || 'Le serveur a refusé les modifications.', /forbidden|revoked|unauthorized|denied|session_required/i.test(message.code || '') ? 'denied' : 'error', message.code || null);
     }
   }
   _sendUpdate(update) {
@@ -376,14 +427,45 @@ export class CollaborativeBoardStore {
     const oldest = Math.min(...[...this.pending.values()].map(value => value.sentAt));
     this._ackTimer = this._timer(() => { this._ackTimer = null; if (this.pending.size && this.socket) { this._disconnectForRetry('La confirmation du serveur tarde ; reconnexion en cours.'); } }, Math.max(1, this.ackTimeout - (Date.now() - oldest)));
   }
-  _reject(message, status = 'error') {
+  _reject(message, status = 'error', code = null) {
     this.rejected = true; this.ready = false; this.lastSaved = false;
+    this.errorCode = code; this._quotaRetrying = false;
     if (this.hasPending || this.queue.length || this.pending.size) {
       this.hasPending = true;
-      this.recoveryDraft = { version: 2, state: encodeBase64(Y.encodeStateAsUpdate(this.doc)), board: this.board, hasPending: true, rejected: true, error: message, revision: this.revision, updatedAt: this.updatedAt };
+      const state = encodeBase64(Y.encodeStateAsUpdate(this.doc));
+      if (this.recoveryDraft && (this.recoveryDraft.state !== state || this.recoveryDraft.errorCode !== code) && !this._retainedRecoveries.some(entry => entry.value.state === this.recoveryDraft.state && entry.value.errorCode === this.recoveryDraft.errorCode)) {
+        this._retainedRecoveries.push({ key: `${this.recoveryPrefix}${uuid()}`, value: clone(this.recoveryDraft) });
+      }
+      this.recoveryDraft = { version: 2, state, board: this.board, hasPending: true, rejected: true, mixedRecovery: false, error: message, errorCode: code, revision: this.revision, updatedAt: this.updatedAt };
+      this._quotaDrafts = code === 'QUOTA_EXCEEDED' ? [{ key: this.recoveryKey, value: clone(this.recoveryDraft) }] : [];
     }
-    clearTimeout(this._flushTimer); clearTimeout(this._ackTimer); clearTimeout(this._reconnectTimer);
+    clearTimeout(this._flushTimer); clearTimeout(this._ackTimer); clearTimeout(this._reconnectTimer); clearTimeout(this._handshakeTimer);
+    this._flushTimer = this._ackTimer = this._reconnectTimer = this._handshakeTimer = null;
     this._setStatus(status, message); this._persist();
+    // Stop the rejected connection entirely: late ACKs cannot acknowledge a
+    // refused draft, and reconnecting is an explicit user action for quotas.
+    if (code === 'QUOTA_EXCEEDED') { const socket = this.socket; this.socket = null; try { socket?.close(); } catch { /* Already disconnected. */ } }
+  }
+  /** Retry only quota refusals; fresh server sync rechecks access before sending. */
+  async retryPending() {
+    if (!this.canRetry) return false;
+    const candidate = new Y.Doc();
+    try {
+      Y.applyUpdate(candidate, Y.encodeStateAsUpdate(this.doc));
+      for (const entry of this._quotaDrafts) {
+        if (!entry.value.rejected || entry.value.errorCode !== 'QUOTA_EXCEEDED') continue;
+        Y.applyUpdate(candidate, decodeBase64(entry.value.state));
+      }
+      boardFromDoc(candidate, this.id, { updatedAt: this.updatedAt });
+      this._applyRemote(Y.encodeStateAsUpdate(candidate));
+    } finally { candidate.destroy(); }
+    this.rejected = false; this.errorCode = null; this.error = null; this.ready = false;
+    this._quotaRetrying = true; this.hasPending = this.restoredPending = true; this.lastSaved = false;
+    this.pending.clear(); this.queue = [];
+    const socket = this.socket; this.socket = null; try { socket?.close(); } catch { /* Already disconnected. */ }
+    this._setStatus('connecting', null); await this._persist();
+    if (!this.destroyed) this._connect();
+    return true;
   }
   updatePresence(patch = {}) {
     this.presence = { ...this.presence, ...clone(patch) };

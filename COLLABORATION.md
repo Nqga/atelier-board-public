@@ -106,6 +106,8 @@ Au chargement d'un projet, le store restaure le cache avant d'ouvrir le WebSocke
 
 Les erreurs temporaires `SAVE_FAILED`, `RATE_LIMIT`, `SERVER_UNAVAILABLE` et `TEMPORARY_FAILURE` gardent les changements en attente et déclenchent une reconnexion avec délai progressif. Elles ne constituent pas une sauvegarde confirmée et ne bloquent pas définitivement le client.
 
+L'erreur `QUOTA_EXCEEDED` conserve le brouillon, suspend l'édition et place le client dans l'état `quota`, sans confirmation de sauvegarde ni nouvelles tentatives automatiques. Après avoir libéré de la capacité, **Réessayer la synchronisation** rétablit la connexion, vérifie de nouveau les droits et propose les changements manquants. Le refus ne donne aucun droit supplémentaire : un accès retiré ou devenu lecteur empêche toujours le renvoi du brouillon. L'export de récupération reste disponible pendant ce blocage.
+
 Un refus définitif de validation ou d'accès suspend les modifications et les renvois automatiques, conserve une copie de récupération et affiche un état d'erreur ou d'accès refusé. Un client devenu lecteur ne renvoie pas son brouillon d'édition. Une copie refusée ou inaccessible est conservée séparément du document autorisé. Le retrait d'accès reste prioritaire sur les changements préparés hors ligne.
 
 L'interface propose **Récupérer ma copie locale** puis **Exporter ma copie locale** pour sauvegarder ce brouillon comme JSON et l'importer dans un tableau local. Les images encore accessibles sont embarquées. Une image devenue inaccessible est remplacée par un texte **Image à réajouter** au même emplacement ; sa référence d'origine est conservée dans `recoveryImageSource`. Cette métadonnée ne donne aucun droit d'accès à l'image. Le JSON de récupération reste importable même après le retrait d'accès au projet. Le cache n'est pas supprimé automatiquement lors du refus.
@@ -124,9 +126,31 @@ La base utilise le journal WAL, les clés étrangères et `synchronous=FULL`. Le
 
 Le serveur valide les racines et types Yjs, refuse les structures incomplètes et les données non JSON, puis applique les limites du document. Une requête de création est limitée à 24 Mio, un document portable à 20 Mio, un projet à 3 000 objets et un champ texte à 20 000 caractères. Une mise à jour Yjs est limitée à 4 Mio et l'état Yjs complet à 32 Mio ; le transport limite les mises à jour à 120 par seconde par participant et la présence à 25 par seconde par connexion.
 
-La base conserve les métadonnées de déduplication des mises à jour acceptées. Cette version ne fournit pas de politique automatique de purge de ce registre ni des images devenues inutilisées ; suivre l'espace disque disponible lors d'une exploitation prolongée.
+La base conserve les métadonnées des 1 000 dernières demandes de mise à jour acceptées par projet pour leur déduplication. Yjs reconnaît également les structures déjà intégrées lorsqu'une ancienne différence est renvoyée. Les images devenues inutilisées dans le tableau ne sont pas automatiquement purgées, afin de conserver la possibilité d'annuler une suppression.
 
 Les images sont limitées à 5 Mio et aux signatures PNG, JPEG, WebP ou GIF ; les SVG importés ne sont pas admis. Les images du serveur sont rattachées à un projet et soumises à son contrôle d'accès. Les exports JSON et SVG embarquent ces images en données base64 pour ne pas dépendre des URL privées ou du cookie de leur auteur.
+
+### Quotas
+
+Trois quotas complètent les limites de taille et de fréquence :
+
+| Configuration | Valeur par défaut | Données comptées |
+| --- | --- | --- |
+| `MAX_BOARDS_PER_GUEST` | `20` | Projets créés par une identité invitée et encore stockés, quel que soit son rôle actuel. |
+| `MAX_BOARD_STORAGE_MB` | `100` | Octets de l'état Yjs complet et des fichiers d'images du projet. |
+| `MAX_TOTAL_STORAGE_MB` | `1024` | Ces mêmes données pour toute l'installation. |
+
+Les variables sont des entiers strictement positifs ; une valeur invalide arrête le démarrage. L'unité des variables `*_MB` est binaire : 1 Mio = 1 048 576 octets. Les valeurs par défaut représentent 100 Mio par projet et 1 Gio au total. Pour utiliser `createAtelierServer(options)` directement, `options.quotas` expose `maxBoardsPerGuest`, `maxBoardBytes` et `maxStorageBytes` ; les deux derniers sont exprimés en octets.
+
+Le créateur est enregistré de façon immuable et reste utilisé pour le quota de projets quand les droits changent. Rejoindre un projet existant ne consomme pas le quota de projets du participant. Lors de la migration d'une base V2 antérieure à ces quotas, le propriétaire le plus ancien encore enregistré devient le créateur retenu pour ce comptage.
+
+Les créations et les images sont vérifiées avant acceptation. Une limite de projets produit une réponse HTTP `409`, une limite de stockage une réponse `413`, avec le code `QUOTA_EXCEEDED`. Une modification WebSocket est appliquée à un candidat et mesurée avant sa persistance ; un dépassement produit `{ type: 'error', code: 'QUOTA_EXCEEDED', id, message }`, sans `ack`, sans changement de l'état serveur et sans diffusion. Les données en cours d'enregistrement sont réservées afin que des envois concurrents ne puissent pas consommer la même capacité disponible.
+
+Réduire les quotas ne supprime aucune donnée existante. Un projet déjà au-dessus d'une limite reste lisible et supprimable ; les mises à jour qui n'augmentent pas les données mesurées restent admissibles. Le comptage porte sur l'état Yjs complet, qui peut conserver des structures supprimées : réduire le nombre d'objets visibles ne garantit donc pas une réduction de sa taille.
+
+Une image reste comptée jusqu'à la suppression du projet, même quand son élément n'est plus visible. La suppression du projet libère la taille de son état ; ses images et d'éventuels fichiers résiduels restent comptés jusqu'à la réussite de leur suppression physique. Les réservations et restes d'une suppression échouée sont conservés durablement et le nettoyage est retenté au démarrage. Des fichiers ordinaires inconnus dans le stockage d'images sont conservés et comptés plutôt que supprimés sans preuve de leur origine.
+
+Ces quotas ne représentent pas la taille complète de `DATA_DIR` : ils n'incluent pas les métadonnées, les journaux SQLite ni l'espace physique de la base. Prévoir la surveillance et les limites de disque de l'hébergeur. Le quota par invité n'est pas une limite par personne vérifiée : une nouvelle identité navigateur peut le contourner, tandis que le quota global reste appliqué. Ce mécanisme ne constitue pas une protection contre les abus ou le déni de service.
 
 ## Déploiement et portée
 

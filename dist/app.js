@@ -51,7 +51,7 @@ function canEdit(){return !isShared()||store.canEdit;}
 function editable(){if(canEdit())return true;toast('Ce projet est en lecture seule.');return false;}
 function getProjects(){return [...repo.list().map(b=>({...b,shared:false})),...collaboration.projects];}
 function initials(name){return String(name||'Vous').trim().split(/\s+/).map(p=>p[0]).slice(0,2).join('').toUpperCase();}
-function getConnection(){return {shared:isShared(),role:isShared()?store.role:'owner',status:sharedStatus?.status,canEdit:canEdit(),hasPending:!!store?.hasPending,hasRecoveryDraft:!!store?.recoveryDraft,users:remoteUsers.map(u=>({...u,id:u.userId}))};}
+function getConnection(){return {shared:isShared(),role:isShared()?store.role:'owner',status:sharedStatus?.status,errorCode:sharedStatus?.errorCode,cacheSaved:!!sharedStatus?.cacheSaved,canRetry:!!sharedStatus?.canRetry,canEdit:canEdit(),hasPending:!!store?.hasPending,hasRecoveryDraft:!!store?.recoveryDraft,users:remoteUsers.map(u=>({...u,id:u.userId}))};}
 function syncProfile(){if(collaboration.user)profile={name:collaboration.user.name,initials:initials(collaboration.user.name)};writeLocal('atelier:profile',profile);$('profileButton').textContent=profile.initials;$('profileButton').title=profile.name;}
 function boardObjects(){return getBoard().objects;}
 function selectedObjects(){return boardObjects().filter(o=>selection.has(o.id));}
@@ -107,7 +107,7 @@ function updateStatus(){
  if(!store)return;
  if(isShared()){
    const s=sharedStatus||{status:'connecting'},pending=s.hasPending;
-   const labels={connecting:'Connexion…',syncing:'Synchronisation…',synced:'Synchronisé',offline:pending?'Hors ligne · en attente':'Hors ligne',readonly:'Lecture seule',denied:'Accès retiré',error:'À récupérer'};
+   const labels={connecting:'Connexion…',syncing:'Synchronisation…',synced:'Synchronisé',offline:pending?'Hors ligne · en attente':'Hors ligne',quota:'Stockage limité',readonly:'Lecture seule',denied:'Accès retiré',error:'À récupérer'};
    $('saveStatus').innerHTML=`<span style="background:${s.status==='synced'?'#60b898':s.status==='readonly'?'#9393aa':'#e99e46'}"></span>${labels[s.status]||'Connexion…'}`;
    $('saveStatus').title=s.error||(s.status==='synced'?'Modifications enregistrées sur le serveur':s.status==='readonly'?'Les modifications des autres participants apparaissent en direct':pending?(s.cacheSaved?'Copie de travail conservée dans ce navigateur ; confirmation du serveur en attente':'Confirmation du serveur en attente ; gardez cet onglet ouvert'):'Connexion au serveur en cours');
    $('saveStatus').style.cursor=store.recoveryDraft?'pointer':'';
@@ -383,7 +383,7 @@ function timerString(){return`${Math.floor(timerSeconds/60).toString().padStart(
 function renderTimer(){const widget=$('timerWidget');widget.hidden=!timerInterval;if(!timerInterval){$('sidebarTimer').textContent='';return;}widget.innerHTML=`${icon('timer')}<strong>${timerString()}</strong><button class="icon-button" id="pauseTimer" aria-label="${timerPaused?'Reprendre':'Pause'}">${icon(timerPaused?'play':'pause')}</button><button class="icon-button" id="stopTimer" aria-label="Arrêter le minuteur">${icon('close')}</button>`;$('sidebarTimer').textContent=timerString();$('pauseTimer').onclick=()=>{timerPaused=!timerPaused;renderTimer();};$('stopTimer').onclick=stopTimer;}
 function startTimer(minutes){stopTimer();timerSeconds=Math.round(minutes*60);timerPaused=false;let end=Date.now()+timerSeconds*1000,last=Date.now();timerInterval=setInterval(()=>{const now=Date.now();if(timerPaused)end+=now-last;else timerSeconds=Math.max(0,Math.ceil((end-now)/1000));last=now;if(timerSeconds<=0){stopTimer();toast('Le temps est écoulé. Place aux échanges !');}else renderTimer();},250);renderTimer();}
 function stopTimer(){clearInterval(timerInterval);timerInterval=null;timerSeconds=0;renderTimer();}
-const dialogs=createDialogs({getBoard,getProjects,getActorId:()=>store.actorId,icon,escape,toast,createProject,openProject,deleteProject,exportBoard,exportRecoveryDraft,importBoard:()=>$('fileInput').click(),renameBoard:title=>store.setTitle(title),focusObject,startTimer,toggleVoting,isVoting:()=>voting,getTimerSeconds:()=>timerSeconds,stopTimer,getProfile:()=>profile,
+const dialogs=createDialogs({getBoard,getProjects,getActorId:()=>store.actorId,icon,escape,toast,createProject,openProject,deleteProject,exportBoard,exportRecoveryDraft,retryPending:()=>store.retryPending(),importBoard:()=>$('fileInput').click(),renameBoard:title=>store.setTitle(title),focusObject,startTimer,toggleVoting,isVoting:()=>voting,getTimerSeconds:()=>timerSeconds,stopTimer,getProfile:()=>profile,
  getSession:()=>collaboration.user,getConnection,refreshProjects,publishCurrentBoard,
  ensureSession:async name=>{const user=await collaboration.ensureSession(name);syncProfile();return user;},
  createInvite:(role,days)=>collaboration.createInvite(store.id,role,days),getMembers:()=>collaboration.getMembers(store.id),

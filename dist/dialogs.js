@@ -154,7 +154,7 @@ export function createDialogs(api) {
     }
 
     const owner = state.role === 'owner';
-    const status = ({ synced: 'Synchronisé', readonly: 'Lecture seule', syncing: 'Synchronisation…', connecting: 'Connexion…', offline: 'Hors ligne', denied: 'Accès retiré', error: 'Connexion interrompue' })[state.status] || 'Connexion…';
+    const status = ({ synced: 'Synchronisé', readonly: 'Lecture seule', syncing: 'Synchronisation…', connecting: 'Connexion…', offline: 'Hors ligne', quota: 'Stockage limité', denied: 'Accès retiré', error: 'Connexion interrompue' })[state.status] || 'Connexion…';
     const canonical = new URL(location.href);
     canonical.hash = '';
     canonical.searchParams.set('board', api.getBoard().id);
@@ -404,9 +404,16 @@ export function createDialogs(api) {
   }
 
   function recovery() {
-    if (!connection().hasRecoveryDraft) return more();
-    show('Conservez vos changements locaux', api.getBoard()?.title || '', `<div class="info-box recovery-notice"><strong>Votre copie est conservée sur cet appareil.</strong><p>Elle contient des changements en attente ou refusés par le serveur. Leur synchronisation avec l’équipe n’est pas confirmée.</p><p>Exportez cette copie en JSON pour conserver votre travail. Vous pourrez l’importer comme un nouveau tableau.</p><p>Les images accessibles sont intégrées au fichier. Une image devenue inaccessible est signalée comme à réajouter ; sa référence est conservée dans le fichier.</p></div><div class="dialog-actions" id="recoveryActions"><button type="button" id="exportRecovery" class="button primary">${icon('download')}Exporter ma copie locale</button></div>`);
+    const state = connection();
+    if (!state.hasRecoveryDraft) return more();
+    const retryNotice = state.canRetry ? '<p>La limite de stockage a été atteinte. Après avoir libéré de l’espace, vous pouvez réessayer de synchroniser ces changements. Ils restent en attente jusqu’à la confirmation du serveur.</p>' : '';
+    const localNotice = state.cacheSaved ? '<strong>Votre copie est conservée sur cet appareil.</strong>' : '<strong>Votre copie reste dans cet onglet.</strong><p>Sa conservation dans le navigateur n’est pas confirmée. Exportez-la avant de fermer cet onglet.</p>';
+    show('Conservez vos changements locaux', api.getBoard()?.title || '', `<div class="info-box recovery-notice">${localNotice}<p>Elle contient des changements en attente ou refusés par le serveur. Leur synchronisation avec l’équipe n’est pas confirmée.</p>${retryNotice}<p>Exportez cette copie en JSON pour conserver votre travail. Vous pourrez l’importer comme un nouveau tableau.</p><p>Les images accessibles sont intégrées au fichier. Une image devenue inaccessible est signalée comme à réajouter ; sa référence est conservée dans le fichier.</p></div><div class="dialog-actions" id="recoveryActions"><button type="button" id="exportRecovery" class="button primary">${icon('download')}Exporter ma copie locale</button>${state.canRetry ? actionButton('retrySynchronization', 'Réessayer la synchronisation') : ''}</div>`);
     on('#exportRecovery', 'click', event => run(() => api.exportRecoveryDraft(), event.currentTarget.parentElement));
+    on('#retrySynchronization', 'click', event => run(async isCurrent => {
+      if (!await api.retryPending()) throw new Error('Le réessai n’est plus disponible. Votre copie locale reste accessible à l’export.');
+      if (isCurrent()) { close(); api.toast('Nouvel essai de synchronisation en cours.'); }
+    }, event.currentTarget.parentElement));
   }
 
   return { boards, templates, share, invite, participants, recovery, help, rename, votes, search, timer, profile, more };

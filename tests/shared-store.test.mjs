@@ -403,7 +403,155 @@ test('authorization failures remain permanent and never auto-retry an unauthoriz
   assert.equal(store.status, 'denied'); assert.equal(store.rejected, true); assert.equal(store.canEdit, false);
   assert.equal(store.hasPending, true); assert.equal(store.lastSaved, false);
   assert.equal((await cache.get(store.cacheKey)).rejected, true); assert.ok(store.recoveryDraft);
-  assert.equal(store._reconnectTimer, undefined);
+  assert.ok(!store._reconnectTimer);
+});
+
+test('quota refusals preserve the draft, stop all automatic reconnects and retry only after an explicit action', async t => {
+  const initial = docFromBoard(baseBoard()), peer = cloneDoc(initial), cache = new MemoryCache();
+  const store = await openStore(initial, { cache, reconnectMin: 2, ackTimeout: 15 });
+  t.after(() => { store.destroy(); initial.destroy(); peer.destroy(); });
+  const first = store.socket; sync(first, initial); ackLast(first);
+  store.replaceText('note-1', 'Salut monde'); await store.save();
+  const refused = first.sent.filter(message => message.type === 'update').at(-1);
+  first.receive({ type: 'error', id: refused.id, code: 'QUOTA_EXCEEDED', message: 'Stockage plein' });
+  await store._cacheChain;
+  const socketCount = MockSocket.sockets.length;
+  assert.equal(store.status, 'quota'); assert.equal(store.errorCode, 'QUOTA_EXCEEDED'); assert.equal(store.canRetry, true);
+  assert.equal(store.lastSaved, false); assert.equal(store.hasPending, true); assert.equal(store.cacheSaved, true); assert.equal(store.canEdit, false);
+  assert.equal(store._statusInfo().canRetry, true); assert.equal(store._statusInfo().errorCode, 'QUOTA_EXCEEDED');
+  assert.equal((await cache.get(store.cacheKey)).errorCode, 'QUOTA_EXCEEDED'); assert.equal(store.recoveryDraft.board.objects[0].text, 'Salut monde');
+  assert.throws(() => store.replaceText('note-1', 'Interdit pendant le blocage'), /suspendues/);
+  first.receive({ type: 'ack', id: refused.id, revision: 50 });
+  store._onlineHandler(); await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(MockSocket.sockets.length, socketCount); assert.equal(store.socket, null); assert.equal(store.lastSaved, false);
+  assert.ok(!store._reconnectTimer); assert.ok(!store._ackTimer);
+  replaceYText(text(peer), 'Bonjour équipe'); peer.getMap('objects').get('note-1').set('x', 222);
+  assert.equal(await store.retryPending(), true);
+  const retry = store.socket; assert.ok(retry); assert.notEqual(retry, first); assert.equal(retry.sent.length, 0, 'fresh authorization precedes every retried update');
+  assert.equal(store.lastSaved, false); assert.equal(store.canRetry, false);
+  sync(retry, peer);
+  const sent = retry.sent.find(message => message.type === 'update'); Y.applyUpdate(peer, decodeBase64(sent.update));
+  assert.equal(boardFromDoc(peer, 'shared-board').objects[0].text, 'Salut équipe'); assert.equal(object(store).x, 222);
+  assert.equal(store.lastSaved, false, 'a successful merge is still not a persistence ACK');
+  ackLast(retry); await store._cacheChain;
+  assert.equal(store.status, 'synced'); assert.equal(store.lastSaved, true); assert.equal(store.hasPending, false); assert.equal(store.errorCode, null);
+  assert.equal((await cache.get(store.cacheKey)).hasPending, false); assert.equal(await store.retryPending(), false);
+});
+
+test('explicit quota retry can fail again without starting a retry loop', async t => {
+  const initial = docFromBoard(baseBoard()), cache = new MemoryCache(), store = await openStore(initial, { cache, reconnectMin: 2, ackTimeout: 15 });
+  t.after(() => { store.destroy(); initial.destroy(); });
+  sync(store.socket, initial); ackLast(store.socket); store.updateObject('note-1', { x: 555 }); await store.save();
+  store.socket.receive({ type: 'error', code: 'QUOTA_EXCEEDED', message: 'Quota atteint' });
+  assert.equal(await store.retryPending(), true); const retry = store.socket; sync(retry, initial);
+  retry.receive({ type: 'error', code: 'QUOTA_EXCEEDED', message: 'Quota toujours atteint' }); await store._cacheChain;
+  const socketCount = MockSocket.sockets.length; await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(MockSocket.sockets.length, socketCount); assert.equal(store.socket, null); assert.equal(store.status, 'quota'); assert.equal(store.canRetry, true);
+  assert.equal(store.recoveryDraft.board.objects[0].x, 555); assert.equal(store.lastSaved, false); assert.equal(store.hasPending, true);
+});
+
+test('a refused draft cannot be automatically resent when ending IME replays an older buffered handshake', async t => {
+  const initial = docFromBoard(baseBoard()), peer = cloneDoc(initial), store = await openStore(initial);
+  t.after(() => { store.destroy(); initial.destroy(); peer.destroy(); });
+  const socket = store.socket; sync(socket, initial); ackLast(socket);
+  store.pauseRemote(); store.replaceText('note-1', 'Salut monde'); await store.save();
+  replaceYText(text(peer), 'Bonjour équipe');
+  socket.receive({ type: 'sync', state: encodeBase64(Y.encodeStateAsUpdate(peer)), vector: encodeBase64(Y.encodeStateVector(peer)), role: 'owner', revision: 2, users: [] });
+  const sentCount = socket.sent.filter(message => message.type === 'update').length;
+  store.onStatus(info => { if (!info.canEdit) store.resumeRemote(); });
+  socket.receive({ type: 'error', code: 'QUOTA_EXCEEDED', message: 'Quota atteint' });
+  assert.equal(store.status, 'quota'); assert.equal(store.rejected, true); assert.equal(store.ready, false); assert.equal(store.canRetry, true);
+  assert.equal(store.lastSaved, false); assert.equal(store.hasPending, true); assert.equal(object(store).text, 'Salut équipe');
+  assert.equal(socket.sent.filter(message => message.type === 'update').length, sentCount);
+  assert.equal(store.socket, null); assert.ok(!store._ackTimer);
+});
+
+test('buffered handshakes, late ACKs and promotion cannot undo an immediate read-only refusal during IME', async t => {
+  const initial = docFromBoard(baseBoard()), peer = cloneDoc(initial), store = await openStore(initial);
+  t.after(() => { store.destroy(); initial.destroy(); peer.destroy(); });
+  const socket = store.socket; sync(socket, initial); ackLast(socket);
+  store.pauseRemote(); store.replaceText('note-1', 'Salut monde'); await store.save();
+  const pendingId = socket.sent.filter(message => message.type === 'update').at(-1).id;
+  replaceYText(text(peer), 'Bonjour équipe');
+  socket.receive({ type: 'sync', state: encodeBase64(Y.encodeStateAsUpdate(peer)), vector: encodeBase64(Y.encodeStateVector(peer)), role: 'owner', revision: 2, users: [] });
+  const sentCount = socket.sent.filter(message => message.type === 'update').length;
+  socket.receive({ type: 'role', role: 'viewer' });
+  socket.receive({ type: 'ack', id: pendingId, revision: 3 });
+  assert.equal(store.role, 'viewer'); assert.equal(store.status, 'readonly'); assert.equal(store.lastSaved, false); assert.equal(store.hasPending, true);
+  store.resumeRemote();
+  assert.equal(store.role, 'viewer', 'an older owner handshake does not supersede the immediate role change');
+  assert.equal(store.status, 'readonly'); assert.equal(store.ready, false); assert.equal(store.errorCode, 'READ_ONLY'); assert.equal(store.canRetry, false);
+  assert.equal(object(store).text, 'Salut équipe'); assert.equal(store.recoveryDraft.board.objects[0].text, 'Salut monde');
+  assert.equal(socket.sent.filter(message => message.type === 'update').length, sentCount);
+  socket.receive({ type: 'role', role: 'editor' });
+  assert.equal(store.canEdit, false); assert.equal(store.lastSaved, false); assert.equal(store.hasPending, true); assert.equal(store.canRetry, false);
+  assert.equal(socket.sent.filter(message => message.type === 'update').length, sentCount);
+});
+
+test('fresh read-only or revoked access makes a quota retry permanently unavailable while keeping its export', async t => {
+  for (const failure of ['viewer', 'FORBIDDEN', 'close']) await t.test(failure, async child => {
+    const initial = docFromBoard(baseBoard()), cache = new MemoryCache(), store = await openStore(initial, { cache });
+    child.after(() => { store.destroy(); initial.destroy(); });
+    sync(store.socket, initial); ackLast(store.socket); store.updateObject('note-1', { x: 123 }); await store.save();
+    store.socket.receive({ type: 'error', code: 'QUOTA_EXCEEDED', message: 'Quota atteint' });
+    assert.equal(await store.retryPending(), true); const retry = store.socket;
+    if (failure === 'viewer') sync(retry, initial, 'viewer');
+    else if (failure === 'close') retry.close(1008, 'Accès retiré');
+    else { retry.open(); retry.receive({ type: 'error', code: failure, message: 'Accès retiré' }); }
+    await store._cacheChain;
+    assert.equal(retry.sent.some(message => message.type === 'update'), false, 'access refusal precedes upload of the cached draft');
+    assert.equal(store.canRetry, false); assert.equal(store.canEdit, false); assert.equal(store.lastSaved, false); assert.equal(store.rejected, true);
+    assert.equal(store.recoveryDraft.board.objects[0].x, 123); assert.equal(await store.retryPending(), false);
+    assert.equal((await cache.get(store.cacheKey)).errorCode, failure === 'viewer' ? 'READ_ONLY' : 'FORBIDDEN');
+    const recovery = await CollaborativeBoardStore.recover('shared-board', { user: { id: 'alice' }, cache, WebSocket: MockSocket });
+    assert.ok(recovery); assert.equal(recovery.recoveryOnly, true); assert.equal(recovery.canRetry, false); assert.equal(await recovery.retryPending(), false); recovery.destroy();
+  });
+});
+
+test('quota retry after repeated reloads merges only quota drafts and preserves unrelated refused tab snapshots', async t => {
+  const initial = docFromBoard(baseBoard()), quotaA = cloneDoc(initial), quotaB = cloneDoc(initial), forbidden = cloneDoc(initial), cache = new MemoryCache();
+  replaceYText(text(quotaA), 'Salut monde'); quotaA.getMap('objects').get('note-1').set('x', 700);
+  replaceYText(text(quotaB), 'Bonjour équipe'); quotaB.getMap('objects').get('note-1').set('y', 800);
+  forbidden.getMap('objects').get('note-1').set('color', '#123456');
+  const snapshot = (doc, code) => ({ version: 2, state: encodeBase64(Y.encodeStateAsUpdate(doc)), rejected: true, hasPending: true, errorCode: code, error: 'Refus sauvegarde', revision: 1, updatedAt: '2026-10-12T14:00:00.000Z' });
+  await cache.set('alice:shared-board', snapshot(quotaA, 'QUOTA_EXCEEDED'));
+  await cache.set('alice:shared-board:pending:quota-a', snapshot(quotaA, 'QUOTA_EXCEEDED'));
+  await cache.set('alice:shared-board:recovery:quota-b', snapshot(quotaB, 'QUOTA_EXCEEDED'));
+  const refusedKey = 'alice:shared-board:recovery:unauthorized'; await cache.set(refusedKey, snapshot(forbidden, 'FORBIDDEN'));
+  const originalRefused = await cache.get(refusedKey);
+  const socketCount = MockSocket.sockets.length;
+  const first = await openStore(initial, { cache });
+  assert.equal(first.status, 'quota'); assert.equal(first.canRetry, true); assert.equal(first.socket, null); assert.equal(object(first).text, 'Bonjour monde');
+  assert.equal(first.recoveryDraft.board.objects[0].color, '#123456'); assert.equal(first.recoveryDraft.errorCode, null, 'mixed recovery exports are not themselves quota retry inputs');
+  first.destroy(); await first._cacheChain;
+  const reopened = await openStore(initial, { cache });
+  t.after(() => { reopened.destroy(); for (const doc of [initial, quotaA, quotaB, forbidden]) doc.destroy(); });
+  assert.equal(reopened.canRetry, true); assert.equal(reopened.errorCode, 'QUOTA_EXCEEDED'); assert.equal(MockSocket.sockets.length, socketCount);
+  assert.equal(await reopened.retryPending(), true); sync(reopened.socket, initial);
+  const sent = reopened.socket.sent.find(message => message.type === 'update'); Y.applyUpdate(initial, decodeBase64(sent.update));
+  const accepted = boardFromDoc(initial, 'shared-board').objects[0];
+  assert.equal(accepted.text, 'Salut équipe'); assert.equal(accepted.x, 700); assert.equal(accepted.y, 800); assert.equal(accepted.color, '#ffffff', 'permanent authorization refusals stay quarantined');
+  assert.equal(reopened.lastSaved, false); ackLast(reopened.socket); await reopened._cacheChain;
+  assert.equal(reopened.lastSaved, true); assert.equal(reopened.hasPending, false); assert.deepEqual(await cache.get(refusedKey), originalRefused);
+  assert.equal(reopened.recoveryDraft.board.objects[0].color, '#123456', 'a successful quota retry does not discard a different refused draft');
+});
+
+test('an old quota snapshot cannot revive a draft later refused for authorization after another tab overwrites the latest cache', async t => {
+  const initial = docFromBoard(baseBoard()), cache = new MemoryCache(), store = await openStore(initial, { cache });
+  sync(store.socket, initial); ackLast(store.socket); store.updateObject('note-1', { x: 999 }); await store.save();
+  store.socket.receive({ type: 'error', code: 'QUOTA_EXCEEDED', message: 'Quota atteint' });
+  assert.equal(await store.retryPending(), true); store.socket.open(); store.socket.receive({ type: 'error', code: 'FORBIDDEN', message: 'Accès retiré' });
+  store.destroy(); await store._cacheChain;
+  // A different authorized tab saved its accepted state after the refusal.
+  await cache.set(store.cacheKey, { version: 2, state: encodeBase64(Y.encodeStateAsUpdate(initial)), rejected: false, hasPending: false, errorCode: null, revision: 2, updatedAt: '2026-10-12T15:00:00.000Z' });
+  const reopened = await openStore(initial, { cache });
+  t.after(() => { reopened.destroy(); initial.destroy(); });
+  assert.equal(reopened.canRetry, false); assert.equal(await reopened.retryPending(), false); assert.equal(object(reopened).x, 10);
+  assert.equal(reopened.recoveryDraft.board.objects[0].x, 999);
+  sync(reopened.socket, initial);
+  const update = reopened.socket.sent.find(message => message.type === 'update');
+  Y.applyUpdate(initial, decodeBase64(update.update)); assert.equal(boardFromDoc(initial, 'shared-board').objects[0].x, 10);
+  ackLast(reopened.socket); assert.equal(reopened.lastSaved, true);
 });
 
 test('two offline tabs with the same guest retain and merge both drafts after their cache snapshots race', async t => {

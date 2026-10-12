@@ -1,11 +1,12 @@
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, open, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, readFile, open, rename, stat } from 'node:fs/promises';
 import { resolve, join, extname, sep } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { Y, docFromBoard, boardFromDoc } from '../dist/shared-model.js';
 import { validateBoard } from '../dist/store.js';
-import { openDatabase, transaction } from './database.mjs';
+import { openDatabase, transaction, MAX_RETAINED_UPDATES } from './database.mjs';
+import { normalizeQuotas, createQuotaManager } from './quotas.mjs';
 import { ApiError, fail, UUID, TOKEN, COOKIE, ROLES, randomToken, hash, requireId, nameOf, cookieToken, decodeUpdate, readBody, readJSON, imageMime, RateLimiter } from './security.mjs';
 
 const DAY = 86400000;
@@ -19,6 +20,7 @@ const base64 = value => Buffer.from(value).toString('base64');
 
 /** One durable SQLite writer and one authoritative Yjs document per active room. */
 export async function createAtelierServer(options = {}) {
+  const quotaLimits = normalizeQuotas(options.quotas);
   const dataDir = resolve(options.dataDir || './data');
   const staticDir = resolve(import.meta.dirname, '../dist');
   const host = options.host || '127.0.0.1';
@@ -33,9 +35,13 @@ export async function createAtelierServer(options = {}) {
   }
   await mkdir(join(dataDir, 'assets'), { recursive: true, mode: 0o700 });
   const db = openDatabase(dataDir);
+  const quotas = createQuotaManager(db, dataDir, quotaLimits);
+  try { await quotas.reconcile(); }
+  catch (error) { db.close(); throw error; }
   const limiter = new RateLimiter(now);
   const rooms = new Map();
   let closed = false;
+  let closePromise = null;
   let started = false;
 
   function requestOrigin(req) {
@@ -253,7 +259,8 @@ export async function createAtelierServer(options = {}) {
           const state = Buffer.from(Y.encodeStateAsUpdate(doc));
           if (state.length > MAX_STATE_BYTES) fail(413, 'PAYLOAD_TOO_LARGE', 'Le projet est trop volumineux.');
           transaction(db, () => {
-            db.prepare('INSERT INTO boards VALUES(?,?,?,?,?,?,?)').run(id, board.title, board.description, state, 0, board.updatedAt, board.objects.length);
+            quotas.assertCreate(session.user.id, id, state.length);
+            db.prepare('INSERT INTO boards(id,title,description,state,revision,updated_at,object_count,creator_id) VALUES(?,?,?,?,?,?,?,?)').run(id, board.title, board.description, state, 0, board.updatedAt, board.objects.length, session.user.id);
             db.prepare('INSERT INTO members VALUES(?,?,?,?)').run(id, session.user.id, 'owner', board.updatedAt);
           });
           cacheRoom({ id, doc, board, state, revision: 0, updatedAt: board.updatedAt, sockets: new Set() });
@@ -269,10 +276,13 @@ export async function createAtelierServer(options = {}) {
       if (req.method === 'DELETE') {
         membership(boardId, session.user.id, 'owner');
         const assets = db.prepare('SELECT id FROM assets WHERE board_id=?').all(boardId);
-        db.prepare('DELETE FROM boards WHERE id=?').run(boardId);
+        transaction(db, () => {
+          quotas.holdDeletedAssets(boardId);
+          db.prepare('DELETE FROM boards WHERE id=?').run(boardId);
+        });
         const room = rooms.get(boardId);
         if (room) { for (const socket of room.sockets) socket.close(1008, 'Projet supprimé.'); room.doc.destroy(); rooms.delete(boardId); }
-        await Promise.allSettled(assets.map(asset => rm(join(dataDir, 'assets', asset.id), { force: true })));
+        await Promise.all(assets.map(asset => quotas.cleanupAsset(asset.id)));
         return json(res, 200, { ok: true });
       }
       fail(405, 'METHOD_NOT_ALLOWED', 'Méthode non prise en charge.');
@@ -345,17 +355,30 @@ export async function createAtelierServer(options = {}) {
         if (!detected || supplied !== detected) fail(415, 'INVALID_IMAGE', 'Envoyez une véritable image PNG, JPEG, WebP ou GIF avec son type de contenu.');
         const id = randomUUID();
         const target = join(dataDir, 'assets', id);
-        const temporary = `${target}.${randomUUID()}.tmp`;
+        const temporaryName = `${id}.${randomUUID()}.tmp`;
+        const temporary = join(dataDir, 'assets', temporaryName);
+        if (req.aborted || res.destroyed) fail(400, 'REQUEST_ABORTED', 'L’envoi de l’image a été annulé.');
+        // Reserve before the first filesystem await. Concurrent uploads, board
+        // creation and live edits all see this durable reservation.
+        quotas.reserveAsset({ id, boardId, size: bytes.length, temporary: temporaryName });
+        let committed = false;
         try {
           const file = await open(temporary, 'wx', 0o600);
           try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
           await rename(temporary, target);
           const directory = await open(join(dataDir, 'assets'), 'r');
           try { await directory.sync(); } finally { await directory.close(); }
-          authenticate(req);
-          membership(boardId, session.user.id, 'editor');
-          db.prepare('INSERT INTO assets VALUES(?,?,?,?,?)').run(id, boardId, detected, bytes.length, iso());
-        } catch (error) { await Promise.allSettled([rm(temporary, { force: true }), rm(target, { force: true })]); throw error; }
+          transaction(db, () => {
+            if (req.aborted || res.destroyed) fail(400, 'REQUEST_ABORTED', 'L’envoi de l’image a été annulé.');
+            authenticate(req);
+            membership(boardId, session.user.id, 'editor');
+            db.prepare('INSERT INTO assets VALUES(?,?,?,?,?)').run(id, boardId, detected, bytes.length, iso());
+            quotas.completeAsset(id);
+          });
+          committed = true;
+        } finally {
+          if (!committed) await quotas.cleanupAsset(id);
+        }
         return json(res, 201, { src: `/api/boards/${boardId}/assets/${id}` });
       }
       if (parts.length === 5 && ['GET', 'HEAD'].includes(req.method)) {
@@ -391,14 +414,18 @@ export async function createAtelierServer(options = {}) {
     res.end(req.method === 'HEAD' ? undefined : bytes);
   }
 
+  const activeRequests = new Set();
   const server = http.createServer((req, res) => {
-    route(req, res).catch(error => {
+    if (closed) return json(res, 503, { error: 'SERVER_CLOSING', code: 'SERVER_CLOSING', message: 'Le serveur redémarre. Réessayez dans un instant.' });
+    const pending = route(req, res).catch(error => {
+      if (res.destroyed) return;
       if (res.headersSent) { res.destroy(); return; }
       if (error instanceof ApiError) return json(res, error.status, { error: error.code, code: error.code, message: error.message });
       if (error.code === 'ENOENT') return json(res, 404, { error: 'NOT_FOUND', code: 'NOT_FOUND', message: 'Ressource introuvable.' });
       console.error('Atelier request failed:', error.message);
       json(res, 503, { error: 'SAVE_FAILED', code: 'SAVE_FAILED', message: 'Le serveur ne peut pas enregistrer cette action. Réessayez dans un instant.' });
-    });
+    }).finally(() => activeRequests.delete(pending));
+    activeRequests.add(pending);
   });
   server.requestTimeout = 30000;
   server.headersTimeout = 15000;
@@ -465,13 +492,22 @@ export async function createAtelierServer(options = {}) {
       const updatedAt = changed ? board.updatedAt : room.updatedAt;
       transaction(db, () => {
         if (changed) {
+          quotas.assertState(room.id, state.length);
           const retained = new Set(board.objects.map(object => object.id));
           for (const deleted of room.board.objects) {
-            if (!retained.has(deleted.id)) db.prepare('INSERT INTO deleted_votes VALUES(?,?,?) ON CONFLICT(board_id,object_id) DO UPDATE SET votes=excluded.votes').run(room.id, deleted.id, JSON.stringify(deleted.votes || {}));
+            if (!retained.has(deleted.id)) {
+              if (Object.keys(deleted.votes || {}).length) db.prepare('INSERT INTO deleted_votes VALUES(?,?,?) ON CONFLICT(board_id,object_id) DO UPDATE SET votes=excluded.votes').run(room.id, deleted.id, JSON.stringify(deleted.votes));
+              else db.prepare('DELETE FROM deleted_votes WHERE board_id=? AND object_id=?').run(room.id, deleted.id);
+            }
           }
           db.prepare('UPDATE boards SET title=?,description=?,state=?,revision=?,updated_at=?,object_count=? WHERE id=?').run(board.title, board.description, state, revision, updatedAt, board.objects.length, room.id);
         }
         db.prepare('INSERT INTO updates VALUES(?,?,?,?,?,?)').run(room.id, message.id, updateHash, socket.user.id, revision, updatedAt);
+        // Keep retry acknowledgements bounded. Older Yjs updates still replay
+        // idempotently against the complete durable document snapshot.
+        db.prepare(`DELETE FROM updates WHERE board_id=? AND rowid NOT IN (
+          SELECT rowid FROM updates WHERE board_id=? ORDER BY rowid DESC LIMIT ?
+        )`).run(room.id, room.id, MAX_RETAINED_UPDATES);
       });
       if (changed) {
         const previousDoc = room.doc;
@@ -601,16 +637,23 @@ export async function createAtelierServer(options = {}) {
     }
     return address();
   }
-  async function close() {
-    if (closed) return;
+  function close() {
+    if (closePromise) return closePromise;
     closed = true;
-    clearInterval(heartbeat);
-    for (const socket of wss.clients) socket.terminate();
-    await new Promise(resolveClose => wss.close(resolveClose));
-    if (started) await new Promise((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
-    for (const room of rooms.values()) room.doc.destroy();
-    rooms.clear();
-    db.close();
+    closePromise = (async () => {
+      clearInterval(heartbeat);
+      for (const socket of wss.clients) socket.terminate();
+      await new Promise(resolveClose => wss.close(resolveClose));
+      if (started) await new Promise((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()));
+      // An aborted HTTP socket can close before its asynchronous file write has
+      // finished. Wait for the route's rollback/cleanup before closing SQLite or
+      // allowing a replacement process to reconcile its reservations.
+      await Promise.allSettled([...activeRequests]);
+      for (const room of rooms.values()) room.doc.destroy();
+      rooms.clear();
+      db.close();
+    })();
+    return closePromise;
   }
   return { server, start, close, address };
 }
