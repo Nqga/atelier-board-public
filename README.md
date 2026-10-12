@@ -109,6 +109,16 @@ Tout visiteur peut créer une nouvelle identité invitée. Effacer ses cookies o
 
 Pour sauvegarder une installation, arrêter proprement le serveur puis copier **tout le répertoire `DATA_DIR`**, qui contient `atelier.sqlite` et le répertoire `assets/`. Restaurer ce répertoire avant de redémarrer. Le cache des navigateurs ne remplace pas cette sauvegarde.
 
+## Recréer la structure vide
+
+Le script Bash [scripts/create-structure.sh](scripts/create-structure.sh) recrée tous les dossiers et noms de fichiers du projet dans une nouvelle destination, avec **chaque fichier vide**, y compris les fichiers cachés et le script lui-même. Il fonctionne seul, sans Git, Node.js ni installation de dépendances.
+
+```bash
+bash scripts/create-structure.sh ./atelier-board-squelette
+```
+
+Sans argument, la destination est `./atelier-board-squelette`, relative au dossier courant. Le script refuse une destination existante. Il crée seulement la structure des sources : le squelette obtenu ne contient pas de code et ne lance pas l'application. Les données d'exécution, `.git/`, `data/` et `node_modules/` ne sont pas créés.
+
 ## Vérifier et comprendre le code
 
 ```bash
