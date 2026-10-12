@@ -41,6 +41,55 @@ const callListeners = (listeners, ...args) => { for (const fn of listeners) { tr
 
 /** Yjs document with server acknowledgements and per-guest offline recovery. */
 export class CollaborativeBoardStore {
+  /** Open an access-denied local copy without connecting or changing its cache. */
+  static async recover(boardId, options = {}) {
+    if (!options.user || typeof options.user.id !== 'string') return null;
+    const cache = options.cache === false ? null : (options.cache || new IndexedDBCollaborationCache());
+    if (!cache) return null;
+    const key = `${options.user.id}:${boardId}`;
+    // One damaged entry must not hide another tab's recoverable draft.
+    const reads = await Promise.allSettled([
+      cache.get(key), cache.get(`${key}:recovery`),
+      cache.list?.(`${key}:pending:`) || [], cache.list?.(`${key}:recovery:`) || [],
+    ]);
+    const entries = [];
+    for (let index = 0; index < reads.length; index++) {
+      if (reads[index].status !== 'fulfilled') continue;
+      const value = reads[index].value;
+      if (index < 2) { if (value?.state) entries.push(value); }
+      else if (Array.isArray(value)) for (const entry of value) if (entry.value?.state) entries.push(entry.value);
+    }
+    let merged = null, updatedAt = null, revision = 0, pending = false, skipped = 0;
+    try {
+      for (const entry of entries) {
+        const candidate = new Y.Doc();
+        try {
+          const state = decodeBase64(entry.state);
+          // Validate each complete snapshot before considering its merge.
+          Y.applyUpdate(candidate, state);
+          boardFromDoc(candidate, boardId);
+          if (merged) {
+            Y.applyUpdate(candidate, Y.encodeStateAsUpdate(merged));
+            boardFromDoc(candidate, boardId);
+          }
+          merged?.destroy(); merged = candidate;
+          if (typeof entry.updatedAt === 'string' && Number.isFinite(Date.parse(entry.updatedAt)) && (!updatedAt || Date.parse(entry.updatedAt) > Date.parse(updatedAt))) updatedAt = entry.updatedAt;
+          if (Number.isSafeInteger(entry.revision) && entry.revision >= 0) revision = Math.max(revision, entry.revision);
+          pending ||= !!entry.hasPending;
+        } catch { skipped++; candidate.destroy(); }
+      }
+      if (!merged) return null;
+      const board = boardFromDoc(merged, boardId, { ...(updatedAt ? { updatedAt } : {}) });
+      const state = encodeBase64(Y.encodeStateAsUpdate(merged));
+      const store = new CollaborativeBoardStore({ board, state, role: 'viewer', revision, updatedAt: board.updatedAt }, { ...options, cache: false });
+      store.recoveryOnly = true; store.recoverySkipped = skipped;
+      store.rejected = true; store.hasPending = pending; store.cacheSaved = true;
+      store.status = 'denied';
+      store.error = skipped ? 'Votre accès est indisponible. Une copie locale a été récupérée ; certaines copies endommagées ont été ignorées.' : 'Votre accès au projet est indisponible. Vous pouvez exporter la copie conservée dans ce navigateur.';
+      store.recoveryDraft = { version: 2, state, board, hasPending: pending, rejected: true, error: store.error, revision, updatedAt: board.updatedAt };
+      return store;
+    } finally { merged?.destroy(); }
+  }
   static async open(meta, options = {}) {
     const store = new CollaborativeBoardStore(meta, options);
     await store._restore();
@@ -72,7 +121,7 @@ export class CollaborativeBoardStore {
     this.socket = null; this._cacheChain = Promise.resolve(); this._cacheGeneration = 0; this._label = ''; this._source = 'local'; this._batchDepth = 0;
     this._remotePauseDepth = 0; this._remoteQueue = [];
     this.undoManager = new Y.UndoManager([this.doc.getMap('meta'), this.doc.getMap('objects')], { trackedOrigins: new Set([LOCAL]), captureTimeout: 700 });
-    this._onlineHandler = () => { if (!this.socket && !this.destroyed && !this.rejected) { clearTimeout(this._reconnectTimer); this._connect(); } };
+    this._onlineHandler = () => { if (!this.socket && !this.destroyed && !this.rejected) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; this._connect(); } };
     globalThis.addEventListener?.('online', this._onlineHandler);
   }
   get board() { return boardFromDoc(this.doc, this.id, { updatedAt: this.updatedAt }); }

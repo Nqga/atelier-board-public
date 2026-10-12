@@ -38,7 +38,7 @@ Un tableau déjà ouvert reste éditable pendant une coupure réseau. Le navigat
 
 Le brouillon est associé au projet et à l'identité du visiteur : sa récupération suppose le même cookie et un stockage navigateur disponible. Une erreur temporaire de sauvegarde ou une limite de fréquence entraîne une nouvelle tentative automatique avec un délai progressif. Si l'accès est retiré ou si une modification est définitivement refusée, le client conserve une copie de récupération et arrête les envois. Utiliser **Récupérer ma copie locale**, puis **Exporter ma copie locale**, pour conserver un JSON à importer dans un tableau local. Les invités utilisent le même serveur que le propriétaire : démarrer l'application séparément sur plusieurs machines ne relie pas leurs projets.
 
-L'export de récupération embarque les images encore accessibles. Quand une image privée ne peut plus être lue, il conserve sa position sous forme d'un texte **Image à réajouter** et garde son ancienne référence dans les métadonnées. Le JSON reste importable ; cette référence ne donne aucun accès à l'image d'origine.
+L'export de récupération embarque les images encore accessibles. Quand une image privée ne peut plus être lue, il conserve sa position sous forme d'un texte **Image à réajouter** et garde son ancienne référence dans les métadonnées. Le JSON reste importable ; cette référence ne donne aucun accès à l'image d'origine. Avec le même cookie et le stockage navigateur conservé, rouvrir le lien du projet après un retrait d'accès permet aussi d'exporter la copie locale en lecture seule ; aucun changement n'est renvoyé au serveur.
 
 ## Fonctionnalités du tableau
 
@@ -69,7 +69,7 @@ Configurer `TRUST_PROXY=1` uniquement quand l'application est accessible au trav
 
 | Variable | Usage |
 | --- | --- |
-| `PORT` | Port HTTP interne, `3000` par défaut. |
+| `PORT` | Port HTTP du serveur Node, `3000` par défaut. Avec Compose, port publié sur l'hôte ; le conteneur écoute toujours sur `3000`. |
 | `HOST` | Adresse d'écoute, `0.0.0.0` par défaut. |
 | `DATA_DIR` | Répertoire persistant des données SQLite et images des projets, `./data` par défaut. |
 | `PUBLIC_URL` | Origine publique utilisée pour les invitations et le contrôle d'origine, par exemple `https://board.example.com`. |
@@ -85,6 +85,8 @@ docker compose up --build -d
 La recette publie le port sur `127.0.0.1` pour un accès local ou un proxy installé sur le même hôte. Avant de la rendre publique, modifier `PUBLIC_URL` et `TRUST_PROXY` dans `.env` puis configurer le proxy HTTPS. Un proxy exécuté dans un autre conteneur peut joindre le service `atelier:3000` sur le même réseau Compose. Ne pas supprimer le volume avec `docker compose down --volumes` si les projets doivent être conservés.
 
 Cette version utilise **une seule instance serveur**. Ne pas lancer plusieurs réplicas partageant le même fichier SQLite : leurs connexions WebSocket et documents en mémoire ne se synchronisent pas entre processus. Prévoir une architecture de coordination et de stockage adaptée avant une montée en charge horizontale.
+
+Tout visiteur peut créer une identité invitée, puis ses propres projets et leurs images. Le serveur limite la taille des documents et des fichiers ainsi que la fréquence des requêtes, mais cette version ne fixe pas de quota total de stockage par visiteur ou pour l'installation. Avant de proposer un service ouvert au grand public, ajouter des quotas de stockage et une gestion des abus adaptés à l'usage prévu.
 
 Pour sauvegarder une installation, arrêter proprement le serveur puis copier **tout le répertoire `DATA_DIR`**, qui contient `atelier.sqlite` et le répertoire `assets/`. Restaurer ce répertoire avant de redémarrer. Le cache des navigateurs ne remplace pas cette sauvegarde.
 
@@ -108,3 +110,9 @@ Les tests vérifient le store local, le modèle partagé et les échanges serveu
 | `dist/vendor/` | Yjs pour navigateur et licences associées. |
 | `dist/templates.js`, `dist/export.js` | Modèles et exports. |
 | `server.mjs`, `server/` | API, WebSocket, contrôle d'accès, SQLite et fichiers. |
+
+## Licence
+
+Le projet est distribué sous [licence MIT](LICENSE), qui autorise sa réutilisation, sa modification et sa redistribution, y compris commerciales, en conservant la notice de copyright et le texte de la licence.
+
+Les bibliothèques tierces conservent leurs licences propres. Les notices de Yjs, lib0 et isomorphic.js intégrées au module navigateur sont réunies dans [dist/vendor/LICENSES.txt](dist/vendor/LICENSES.txt) ; les dépendances installées par npm fournissent également leurs notices dans leurs paquets.

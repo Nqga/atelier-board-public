@@ -175,6 +175,24 @@ test('missing acknowledgements trigger reconnect and replay only the missing CRD
   assert.equal(object(store).x, 777); assert.equal(store.lastSaved, true); assert.equal(store.hasPending, false);
 });
 
+test('an immediate online reconnect that fails keeps retrying instead of retaining its cancelled timer', async t => {
+  const initial = docFromBoard(baseBoard()), store = await openStore(initial, { reconnectMin: 20, reconnectMax: 20 });
+  t.after(() => { store.destroy(); initial.destroy(); });
+  store.socket.close();
+  const cancelledTimer = store._reconnectTimer;
+  assert.ok(cancelledTimer);
+  store._onlineHandler();
+  const immediateRetry = store.socket;
+  assert.ok(immediateRetry); assert.equal(store._reconnectTimer, null);
+  immediateRetry.close();
+  assert.ok(store._reconnectTimer); assert.notEqual(store._reconnectTimer, cancelledTimer);
+  const deadline = Date.now() + 1000;
+  while (!store.socket && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(store.socket); assert.notEqual(store.socket, immediateRetry);
+  sync(store.socket, initial); ackLast(store.socket);
+  assert.equal(store.status, 'synced'); assert.equal(store.lastSaved, true);
+});
+
 test('an old ACK cannot clear later local edits or a second in-flight update', async t => {
   const initial = docFromBoard(baseBoard()), store = await openStore(initial);
   t.after(() => { store.destroy(); initial.destroy(); });
@@ -481,4 +499,49 @@ test('cacheSaved remains false until the newest queued draft is actually written
   assert.equal(store.cacheSaved, false, 'the first completed write cannot confirm the second queued edit');
   cache.blocked = false; cache.waiters.shift()(); await store._cacheChain;
   assert.equal(store.cacheSaved, true);
+});
+
+test('access-denied recovery merges all guest-specific local snapshots without connecting or writing', async t => {
+  const initial = docFromBoard(baseBoard()), a = cloneDoc(initial), b = cloneDoc(initial), refused = cloneDoc(initial), other = docFromBoard(createBoard({ id: 'shared-board', title: 'Un autre invité', objects: [] })), cache = new MemoryCache();
+  replaceYText(text(a), 'Salut monde'); a.getMap('objects').get('note-1').set('x', 700);
+  replaceYText(text(b), 'Bonjour équipe'); b.getMap('objects').get('note-1').set('y', 800);
+  refused.getMap('objects').get('note-1').set('color', '#123456');
+  const snapshot = (doc, hasPending = false) => ({ state: encodeBase64(Y.encodeStateAsUpdate(doc)), hasPending, revision: 2, updatedAt: '2026-10-12T14:00:00.000Z' });
+  await cache.set('alice:shared-board', snapshot(initial));
+  await cache.set('alice:shared-board:pending:a', snapshot(a, true));
+  await cache.set('alice:shared-board:pending:b', snapshot(b, true));
+  await cache.set('alice:shared-board:recovery:refused', { ...snapshot(refused, true), rejected: true });
+  await cache.set('other:shared-board:pending:private', snapshot(other, true));
+  const before = structuredClone([...cache.values.entries()]);
+  let sockets = 0, writes = 0;
+  class ForbiddenSocket { constructor() { sockets++; throw new Error('Recovery must not connect.'); } }
+  cache.set = cache.delete = cache.deleteIfUnchanged = async () => { writes++; throw new Error('Recovery must not alter its source.'); };
+  const store = await CollaborativeBoardStore.recover('shared-board', { user: { id: 'alice' }, cache, url: 'ws://localhost/live', WebSocket: ForbiddenSocket });
+  t.after(() => { store?.destroy(); for (const doc of [initial, a, b, refused, other]) doc.destroy(); });
+  assert.ok(store); assert.equal(store.recoveryOnly, true); assert.equal(store.status, 'denied'); assert.equal(store.role, 'viewer');
+  assert.equal(object(store).text, 'Salut équipe'); assert.equal(object(store).x, 700); assert.equal(object(store).y, 800); assert.equal(object(store).color, '#123456');
+  assert.equal(store.board.title, 'Équipe'); assert.equal(store.canEdit, false); assert.equal(store.lastSaved, false); assert.equal(store.hasPending, true);
+  assert.deepEqual(store.recoveryDraft.board, store.board);
+  assert.throws(() => store.replaceText('note-1', 'Impossible'), /suspendues/);
+  assert.throws(() => store.undo(), /suspendues/);
+  store._onlineHandler(); store.updatePresence({ cursor: { x: 1, y: 2 } }); await store.save(); store.destroy();
+  assert.equal(sockets, 0); assert.equal(writes, 0); assert.deepEqual([...cache.values.entries()], before);
+  assert.equal(await CollaborativeBoardStore.recover('shared-board', { user: { id: 'unknown' }, cache }), null);
+});
+
+test('access-denied recovery isolates corrupt snapshots and failed cache reads', async t => {
+  const initial = docFromBoard(baseBoard()), hidden = cloneDoc(initial), cache = new MemoryCache();
+  hidden.getMap('unauthorized').set('payload', 'Corruption');
+  await cache.set('alice:shared-board', { state: 'not valid base64', hasPending: true });
+  await cache.set('alice:shared-board:pending:bad-schema', { state: encodeBase64(Y.encodeStateAsUpdate(hidden)), hasPending: true });
+  await cache.set('alice:shared-board:pending:valid', { state: encodeBase64(Y.encodeStateAsUpdate(initial)), hasPending: true });
+  const originalGet = cache.get.bind(cache);
+  cache.get = async key => { if (key.endsWith(':recovery')) throw new Error('One key failed'); return originalGet(key); };
+  const store = await CollaborativeBoardStore.recover('shared-board', { user: { id: 'alice' }, cache });
+  t.after(() => { store?.destroy(); initial.destroy(); hidden.destroy(); });
+  assert.ok(store); assert.equal(object(store).text, 'Bonjour monde'); assert.equal(store.recoverySkipped, 2);
+  assert.equal(store.canEdit, false); assert.equal(store.status, 'denied'); assert.match(store.error, /endommagées/);
+  assert.equal(await CollaborativeBoardStore.recover('shared-board', { cache }), null);
+  const damagedOnly = new MemoryCache(); await damagedOnly.set('alice:shared-board', { state: 'invalid' });
+  assert.equal(await CollaborativeBoardStore.recover('shared-board', { user: { id: 'alice' }, cache: damagedOnly }), null);
 });
