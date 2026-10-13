@@ -13,6 +13,7 @@ const gitAvailable = spawnSync('git', ['--version'], { stdio: 'ignore' }).status
 const bashAvailable = spawnSync('bash', ['--version'], { stdio: 'ignore' }).status === 0;
 const supported = gitAvailable && bashAvailable;
 const options = { skip: supported ? false : 'Tests du générateur : Git et Bash sont nécessaires.' };
+const targetVersion = '2.1.1';
 let scratch, source, installer;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 
@@ -27,8 +28,8 @@ before(async () => {
   scratch = await mkdtemp(join(tmpdir(), 'atelier-offline-tests-'));
   source = join(scratch, 'sources');
   await mkdir(source);
-  await put(source, 'package.json', JSON.stringify({ name: 'atelier-board', version: '2.1.0' }, null, 2) + '\n');
-  await put(source, 'server.mjs', 'export const version = "2.1.0";\n');
+  await put(source, 'package.json', JSON.stringify({ name: 'atelier-board', version: targetVersion }, null, 2) + '\n');
+  await put(source, 'server.mjs', `export const version = "${targetVersion}";\n`);
   await put(source, 'dist/app.js', 'export const newCode = true;\n');
   await put(source, 'scripts/demo.sh', '#!/usr/bin/env bash\nprintf "v2.1\\n"\n');
   await put(source, 'deploy/Caddyfile', 'example.invalid {\n reverse_proxy app:3000\n}\n');
@@ -91,7 +92,7 @@ test('offline update installs sources with normalized modes and preserves privat
   const oldServer = await readFile(join(target, 'server.mjs'));
   const result = run(target);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(await readFile(join(target, 'package.json'), 'utf8')).version, '2.1.0');
+  assert.equal(JSON.parse(await readFile(join(target, 'package.json'), 'utf8')).version, targetVersion);
   assert.deepEqual(await privateSnapshot(target), original);
   assert.equal((await lstat(join(target, 'node_modules'))).isSymbolicLink(), true);
   assert.equal((await stat(join(target, 'deploy/Caddyfile'))).mode & 0o777, 0o644);
@@ -122,14 +123,27 @@ test('--check validates without changing the target or creating a backup', optio
 
 test('wrong project and incompatible versions are rejected before writing source files', options, async () => {
   for (const [index, name, version] of [[0, 'other-project', '2.0.0'], [1, 'atelier-board', '1.9.0'],
-    [2, 'atelier-board', '2.2.0'], [3, 'atelier-board', '2.1.1']]) {
+    [2, 'atelier-board', '2.2.0'], [3, 'atelier-board', '2.1.2'], [4, 'atelier-board', '2.1.1-beta.1']]) {
     const target = await destination(`invalid-version-${index}`);
     await put(target, 'package.json', JSON.stringify({ name, version }, null, 2));
     const before = await sourceSnapshot(target);
     const result = run(target);
     assert.notEqual(result.status, 0);
     assert.deepEqual(await sourceSnapshot(target), before);
-    assert.match(result.stderr, /v2\.0\.x ou v2\.1\.0/);
+    assert.match(result.stderr, /v2\.0\.x, v2\.1\.0 ou v2\.1\.1/);
+  }
+});
+
+test('v2.0 patches and v2.1.0 upgrade offline while preserving the configured server address', options, async () => {
+  for (const version of ['2.0.99', '2.1.0', targetVersion]) {
+    const target = await destination(`supported-version-${version}`);
+    await put(target, 'package.json', JSON.stringify({ name: 'atelier-board', version }, null, 2));
+    await put(target, '.env', 'PUBLIC_URL=http://localhost:3000\nKEEP_LOCAL_CONFIG=yes\n');
+    const original = await privateSnapshot(target);
+    const result = run(target);
+    assert.equal(result.status, 0, `${version}: ${result.stderr}`);
+    assert.equal(JSON.parse(await readFile(join(target, 'package.json'), 'utf8')).version, targetVersion);
+    assert.deepEqual(await privateSnapshot(target), original);
   }
 });
 
@@ -258,8 +272,8 @@ test('a destination without Git, Node or Docker in PATH accepts the update', opt
   assert.equal(result.status, 0, result.stderr);
 });
 
-test('the updater applies to actual initial and latest V2 archives without Git metadata', options, async t => {
-  for (const revision of ['eb140cf', '4aadce0']) {
+test('the updater applies to actual V2 and v2.1.0 archives without Git metadata', options, async t => {
+  for (const revision of ['eb140cf', '4aadce0', '1e9f778']) {
     if (spawnSync('git', ['cat-file', '-e', `${revision}^{commit}`], { cwd: repository }).status !== 0) {
       t.diagnostic(`Archive ${revision} absente dans cette copie ; scénario historique non exécuté.`);
       continue;
@@ -269,15 +283,40 @@ test('the updater applies to actual initial and latest V2 archives without Git m
     const archive = join(scratch, `v2-${revision}.tar`);
     await writeFile(archive, execFileSync('git', ['archive', revision], { cwd: repository, maxBuffer: 8 * 1024 * 1024 }));
     execFileSync('tar', ['-xf', archive, '-C', target]);
-    await put(target, '.env', 'KEEP_LOCAL_CONFIG=yes\n');
+    await put(target, '.env', 'PUBLIC_URL=http://localhost:3000\nKEEP_LOCAL_CONFIG=yes\n');
     await put(target, 'data/atelier.sqlite', Buffer.from('SQLite fixture bytes to retain exactly'));
     await put(target, 'data/assets/existing.png', Buffer.from([137, 80, 78, 71]));
     const result = run(target);
     assert.equal(result.status, 0, `${revision}: ${result.stderr}`);
-    assert.equal(JSON.parse(await readFile(join(target, 'package.json'), 'utf8')).version, '2.1.0');
-    assert.equal(await readFile(join(target, '.env'), 'utf8'), 'KEEP_LOCAL_CONFIG=yes\n');
+    assert.equal(JSON.parse(await readFile(join(target, 'package.json'), 'utf8')).version, targetVersion);
+    assert.equal(await readFile(join(target, '.env'), 'utf8'), 'PUBLIC_URL=http://localhost:3000\nKEEP_LOCAL_CONFIG=yes\n');
     assert.equal(await readFile(join(target, 'data/atelier.sqlite'), 'utf8'), 'SQLite fixture bytes to retain exactly');
     assert.deepEqual(await readFile(join(target, 'data/assets/existing.png')), Buffer.from([137, 80, 78, 71]));
     await assert.rejects(stat(join(target, '.git')), { code: 'ENOENT' });
   }
+});
+
+test('a failed upgrade of the released v2.1.0 restores all source files and its local configuration', options, async t => {
+  const revision = '1e9f778';
+  if (spawnSync('git', ['cat-file', '-e', `${revision}^{commit}`], { cwd: repository }).status !== 0) {
+    t.skip('Archive v2.1.0 absente dans cette copie.');
+    return;
+  }
+  const target = join(scratch, 'real-v2.1.0-rollback');
+  await mkdir(target);
+  const archive = join(scratch, 'v2.1.0-rollback.tar');
+  await writeFile(archive, execFileSync('git', ['archive', revision], { cwd: repository, maxBuffer: 8 * 1024 * 1024 }));
+  execFileSync('tar', ['-xf', archive, '-C', target]);
+  await put(target, '.env', 'PUBLIC_URL=http://localhost:3000\nKEEP_LOCAL_CONFIG=yes\n');
+  await put(target, 'data/atelier.sqlite', Buffer.from('existing v2.1.0 database bytes'));
+  const before = await sourceSnapshot(target);
+  const wrappers = join(scratch, 'v2.1.0-failure-wrappers');
+  await mkdir(wrappers);
+  const realMv = execFileSync('bash', ['-c', 'command -v mv'], { encoding: 'utf8' }).trim();
+  await put(wrappers, 'mv', `#!/usr/bin/env bash\ncount=$(cat "$ATELIER_TEST_COUNTER" 2>/dev/null || printf '0')\ncount=$((count + 1))\nprintf '%s' "$count" > "$ATELIER_TEST_COUNTER"\nif ((count == 4)); then exit 44; fi\nexec "${realMv}" "$@"\n`, 0o755);
+  const result = run(target, [], { PATH: `${wrappers}:${process.env.PATH}`,
+    ATELIER_TEST_COUNTER: join(scratch, 'v2.1.0-mv-counter') });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /annulées/);
+  assert.deepEqual(await sourceSnapshot(target), before);
 });

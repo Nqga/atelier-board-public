@@ -1,6 +1,6 @@
-# Atelier Board — V2.1 collaborative et conteneurisée
+# Atelier Board — V2.1.1 collaborative et conteneurisée
 
-Un tableau visuel web en français pour organiser des idées, les relier et voter. Les projets privés se partagent par invitation, sans compte à créer, avec synchronisation en temps réel entre navigateurs et appareils. La V2.1 ajoute un déploiement Docker pour serveur, une configuration HTTPS Caddy et un script autonome de mise à jour du code V2 hors ligne.
+Un tableau visuel web en français pour organiser des idées, les relier et voter. Les projets privés se partagent par invitation, sans compte à créer, avec synchronisation en temps réel entre navigateurs et appareils. La V2.1.1 permet l'accès direct à un serveur distant sur `http://ADRESSE_DU_SERVEUR:3000`, conserve la recette HTTPS Caddy et fournit un script autonome de mise à jour du code V2 hors ligne.
 
 ## Démarrer
 
@@ -18,6 +18,8 @@ Ouvrir `http://localhost:3000`. Le serveur sert l'interface, les API, les images
 Les fichiers de l'interface et le module Yjs pour navigateur sont déjà présents dans `dist/`. `npm run build:vendor` sert à reconstruire ce module après une modification de ses dépendances ; il n'est pas nécessaire pour un démarrage normal.
 
 ## Travailler à plusieurs
+
+Tous les participants doivent ouvrir l'adresse de la même installation, par exemple `http://ADRESSE_DU_SERVEUR:3000`. Chacun crée une identité invitée en choisissant son prénom ou pseudonyme ; il n'y a ni inscription par e-mail ni mot de passe.
 
 1. Ouvrir un tableau local, puis utiliser **Partager**, choisir un prénom ou un pseudonyme et cliquer sur **Activer le partage**. Une copie du tableau devient un projet privé sauvegardé sur le serveur ; le tableau local est conservé.
 2. Choisir **Modification** ou **Lecture**, puis **Créer un lien d'invitation** et **Copier**.
@@ -57,11 +59,11 @@ Le canevas n'a pas de pages imposées. Le zoom est borné entre 2,5 % et 1 200 %
 
 La vue, la sélection, le mode présentation et le minuteur sont propres à chaque participant. Le minuteur n'est pas synchronisé entre les navigateurs.
 
-## Héberger la V2.1 avec Docker
+## Héberger la V2.1.1 avec Docker
 
 Prérequis : un serveur avec **Docker Engine** et **Docker Compose** ; la recette HTTPS demande Compose **2.24.4 ou plus récent**. Node.js et npm restent dans l'image : ils ne sont pas nécessaires sur l'hôte. La construction peut télécharger l'image Node et les dépendances npm.
 
-Pour tester sur le serveur en accès local :
+Pour publier sur une machine distante avec son adresse et le port `3000` :
 
 ```bash
 cp .env.example .env
@@ -70,7 +72,11 @@ docker compose ps
 curl http://localhost:3000/api/health
 ```
 
-Le port HTTP est publié sur `127.0.0.1`. Pour une publication HTTPS, faire pointer son domaine vers le serveur, ouvrir les ports 80 et 443, puis, depuis la racine du projet :
+Dans `.env`, conserver `PORT=3000`, `BIND_ADDRESS=0.0.0.0`, `PUBLIC_URL=` et `TRUST_PROXY=0`. Ouvrir le port TCP `3000` dans le pare-feu du serveur et chez l'hébergeur ; si le serveur est derrière un routeur, prévoir aussi sa redirection de port. Tous les participants peuvent alors ouvrir **`http://ADRESSE_DU_SERVEUR:3000`**. Une adresse privée n'est joignable que depuis les réseaux qui y ont accès. `localhost` désigne l'appareil du visiteur, pas le serveur distant.
+
+`PUBLIC_URL` vide utilise l'adresse réelle de la requête pour le contrôle d'origine. Il est aussi possible de fixer `PUBLIC_URL=http://ADRESSE_DU_SERVEUR:3000` si tout le monde utilise exactement cette adresse. **Lors d'une mise à jour, corriger l'ancien `.env` s'il contient `PUBLIC_URL=http://localhost:3000`** : le script hors ligne préserve ce fichier privé. Pour limiter l'écoute à l'hôte, utiliser `BIND_ADDRESS=127.0.0.1`.
+
+En HTTP, les sessions et invitations circulent sans chiffrement. Pour une publication HTTPS, faire pointer son domaine vers le serveur, ouvrir les ports 80 et 443, puis, depuis la racine du projet :
 
 ```bash
 cp .env.production.example .env.production
@@ -92,15 +98,16 @@ Pour une installation Node classique :
 PORT=3000 DATA_DIR=./data PUBLIC_URL=https://board.example.com TRUST_PROXY=1 npm start
 ```
 
-Configurer `TRUST_PROXY=1` uniquement derrière un proxy HTTPS de confiance, sans accès public direct au serveur Node. Le proxy doit transmettre `X-Forwarded-Proto` et les en-têtes WebSocket. Node ne charge pas automatiquement les fichiers `.env` : passer les variables au processus ou utiliser son option `--env-file`. Docker Compose utilise `.env` pour ses substitutions ; la recette HTTPS utilise explicitement `.env.production`.
+En HTTP direct, utiliser `HOST=0.0.0.0`, `PORT=3000`, `PUBLIC_URL=` et `TRUST_PROXY=0`. Configurer `TRUST_PROXY=1` uniquement derrière un proxy HTTPS de confiance, sans accès public direct au serveur Node. Le proxy doit transmettre `X-Forwarded-Proto` et les en-têtes WebSocket. Node ne charge pas automatiquement les fichiers `.env` : passer les variables au processus ou utiliser son option `--env-file`. Docker Compose utilise `.env` pour ses substitutions ; la recette HTTPS utilise explicitement `.env.production`.
 
 | Variable | Usage |
 | --- | --- |
 | `PORT` | Port du serveur Node, `3000` par défaut. Avec Compose, port publié sur l'hôte ; le conteneur écoute sur `3000`. |
 | `HOST` | Adresse d'écoute Node, `0.0.0.0` par défaut. |
+| `BIND_ADDRESS` | Adresse de publication Docker sur l'hôte, `0.0.0.0` par défaut ; `127.0.0.1` pour un accès local seulement. |
 | `DATA_DIR` | Données SQLite et images : `./data` avec Node, `/data` dans le volume Docker. |
-| `PUBLIC_URL` | Origine publique des invitations et du contrôle d'origine. La recette HTTPS la construit depuis `DOMAIN`. |
-| `TRUST_PROXY` | `1` ou `true` derrière un proxy HTTPS de confiance ; `0` en HTTP local. La recette Caddy fixe `1`. |
+| `PUBLIC_URL` | Origine publique autorisée, protocole et port compris, sans chemin. Vide en HTTP direct pour utiliser l'adresse de la requête ; la recette HTTPS la construit depuis `DOMAIN`. |
+| `TRUST_PROXY` | `1` ou `true` derrière un proxy HTTPS de confiance ; `0` en HTTP direct. La recette Caddy fixe `1`. |
 | `DOMAIN` | Domaine public sans protocole ni chemin, pour la recette HTTPS. |
 | `MAX_BOARDS_PER_GUEST` | Projets créés et encore stockés par identité invitée, `20` par défaut. |
 | `MAX_BOARD_STORAGE_MB` | État Yjs complet et images par projet, `100` par défaut. |
@@ -108,9 +115,26 @@ Configurer `TRUST_PROXY=1` uniquement derrière un proxy HTTPS de confiance, san
 
 Les quotas sont des entiers strictement positifs. Une unité de stockage vaut **1 048 576 octets (1 Mio)** : les valeurs par défaut sont 100 Mio par projet et 1 Gio au total. Une configuration invalide empêche le démarrage.
 
-## Appliquer la V2.1 hors ligne sur une V2
+### Vérifier un accès distant et une invitation
 
-Télécharger une seule fois [releases/atelier-board-v2-to-v2.1.sh](releases/atelier-board-v2-to-v2.1.sh), puis transférer ce fichier vers la machine qui contient la V2. Il embarque les sources V2.1 : ni Git, ni Node, ni npm, ni accès réseau ne sont nécessaires pour appliquer les modifications.
+Depuis un autre appareil, ouvrir `http://ADRESSE_DU_SERVEUR:3000`, créer un tableau et activer son partage avec un pseudonyme. Créer un lien **Modification** et l'ouvrir dans un deuxième navigateur ou une fenêtre privée : choisir un autre pseudonyme, rejoindre, puis vérifier qu'un post-it créé ou modifié de chaque côté apparaît chez l'autre. Recharger les deux pages pour contrôler la persistance. Un lien **Lecture** doit permettre la consultation sans modification.
+
+Le [guide de déploiement](deploy/DEPLOYMENT.md#diagnostiquer-les-erreurs-de-session-et-dorigine) distingue une session manquante (`401 SESSION_REQUIRED`) d'une mauvaise origine configurée (`403 ORIGIN_FORBIDDEN`). `GET /api/session` répond normalement `200` avec `user: null` avant le choix du pseudonyme.
+
+### Vérifier la montée en charge
+
+Le benchmark lance sa propre installation temporaire et simule des participants distincts. Il ne contacte pas le serveur de production et ne modifie pas ses données :
+
+```bash
+npm run load:test -- --participants 50 --duration 10 --boards 1
+npm run load:test -- --participants 100 --duration 10 --boards 10 --json /tmp/atelier-load.json
+```
+
+Il mesure les confirmations de sauvegarde, les latences, la mémoire et le retard de la boucle serveur, et vérifie la convergence des participants et de l'état stocké. La limite d'admission par défaut est de **50 connexions par projet**, avec **500 connexions au total**. Ses résultats caractérisent la machine et le scénario testés ; ils ne garantissent pas une capacité identique avec de grands tableaux, beaucoup d'images ou des clients lents. Voir les [limites de déploiement](deploy/DEPLOYMENT.md#charge-et-limites-de-linstallation) et les [mesures de cette livraison](deploy/DEPLOYMENT.md#mesures-de-cette-livraison) avant d'augmenter la capacité.
+
+## Appliquer la V2.1.1 hors ligne sur une V2
+
+Télécharger une seule fois [releases/atelier-board-v2-to-v2.1.sh](releases/atelier-board-v2-to-v2.1.sh), puis transférer ce fichier vers la machine qui contient la V2. Il embarque les sources V2.1.1 : ni Git, ni Node, ni npm, ni accès réseau ne sont nécessaires pour appliquer les modifications.
 
 Arrêter l'application et sauvegarder ses données avant de l'utiliser :
 
@@ -119,13 +143,13 @@ bash atelier-board-v2-to-v2.1.sh --check /chemin/atelier-board
 bash atelier-board-v2-to-v2.1.sh /chemin/atelier-board
 ```
 
-Le script accepte un projet `atelier-board` en version `2.0.x` ou déjà `2.1.0`, vérifie l'archive et crée une sauvegarde privée des sources remplacées à côté du projet. Il conserve les fichiers `.env` privés, `data/`, `node_modules/` et `.git/`. Il ne démarre aucun serveur et ne lance ni migration de base, ni installation de dépendances.
+Le script accepte un projet `atelier-board` en version `2.0.x`, `2.1.0` ou `2.1.1`, vérifie l'archive et crée une sauvegarde privée des sources remplacées à côté du projet. Il conserve les fichiers `.env` privés, `data/`, `node_modules/` et `.git/`. Il ne démarre aucun serveur et ne lance ni migration de base, ni installation de dépendances. Pour l'accès HTTP distant, vérifier ensuite que l'ancien `.env` ne fixe plus `PUBLIC_URL` à `localhost` ou à une origine HTTPS qui n'est pas utilisée.
 
 Si un fichier `SHA256SUMS` accompagne le script sur la page de version GitHub, le télécharger pour une vérification supplémentaire. Placer les deux fichiers dans le même dossier, puis lancer `sha256sum -c SHA256SUMS` depuis ce dossier. Le script reste autonome et contrôle également l'archive qu'il embarque.
 
 **Le mode hors ligne concerne la mise à jour du code.** Construire ou démarrer Docker peut ensuite demander Internet pour télécharger des images et des dépendances. Le script n'est pas une sauvegarde des projets, sessions et images : suivre la [procédure de déploiement et de sauvegarde](deploy/DEPLOYMENT.md).
 
-Pour régénérer le script depuis les sources V2.1, le mainteneur doit disposer de Git et Node.js. Le générateur utilise uniquement les fichiers de l'index Git, afin de laisser les fichiers locaux non suivis hors de l'archive. Indexer explicitement tout nouveau fichier source avant génération, par exemple avec `git add chemin/du/fichier`, puis :
+Pour régénérer le script depuis les sources V2.1.1, le mainteneur doit disposer de Git et Node.js. Le générateur utilise uniquement les fichiers de l'index Git, afin de laisser les fichiers locaux non suivis hors de l'archive. Indexer explicitement tout nouveau fichier source avant génération, par exemple avec `git add chemin/du/fichier`, puis :
 
 ```bash
 npm run build:offline-update
@@ -181,6 +205,7 @@ Les tests vérifient le store local, le modèle partagé et les échanges serveu
 | `server.mjs`, `server/` | API, WebSocket, contrôle d'accès, SQLite et fichiers. |
 | `Dockerfile`, `docker-compose.yml`, `deploy/` | Conteneur, HTTPS et procédures de déploiement. |
 | `scripts/build-offline-update.mjs`, `releases/` | Construction et distribution du script autonome de mise à jour. |
+| `scripts/load-test.mjs` | Benchmark isolé avec plusieurs participants et contrôle de convergence. |
 
 ## Licence
 

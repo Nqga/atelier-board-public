@@ -118,11 +118,11 @@ export class CollaborativeBoardStore {
     this.pending = new Map(); this.queue = []; this.hasPending = false; this.lastSaved = false; this.cacheSaved = false;
     this.status = 'connecting'; this.error = null; this.errorCode = null; this.users = []; this.presence = { cursor: null, selection: [], editing: null };
     this._quotaDrafts = []; this._retainedRecoveries = []; this._quotaRetrying = false;
-    this.destroyed = false; this.ready = false; this.rejected = false; this.restoredPending = false; this.reconnectAttempts = 0;
+    this.destroyed = false; this.ready = false; this.rejected = false; this.restoredPending = false; this.reconnectAttempts = 0; this._retryNotBefore = 0;
     this.socket = null; this._cacheChain = Promise.resolve(); this._cacheGeneration = 0; this._label = ''; this._source = 'local'; this._batchDepth = 0;
     this._remotePauseDepth = 0; this._remoteQueue = [];
     this.undoManager = new Y.UndoManager([this.doc.getMap('meta'), this.doc.getMap('objects')], { trackedOrigins: new Set([LOCAL]), captureTimeout: 700 });
-    this._onlineHandler = () => { if (!this.socket && !this.destroyed && !this.rejected) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; this._connect(); } };
+    this._onlineHandler = () => { if (!this.socket && !this.destroyed && !this.rejected) { if (Date.now() < this._retryNotBefore) { this._reconnect(); return; } clearTimeout(this._reconnectTimer); this._reconnectTimer = null; this._connect(); } };
     globalThis.addEventListener?.('online', this._onlineHandler);
   }
   get board() { return boardFromDoc(this.doc, this.id, { updatedAt: this.updatedAt }); }
@@ -290,6 +290,7 @@ export class CollaborativeBoardStore {
   _timer(fn, delay) { const timer = setTimeout(fn, delay); timer.unref?.(); return timer; }
   _connect() {
     if (this.destroyed || this.rejected || this.socket) return;
+    if (Date.now() < this._retryNotBefore) { this._reconnect(); return; }
     if (!this.WebSocket || !this.url) { this._setStatus(this.role === 'viewer' ? 'readonly' : 'offline'); return; }
     this.ready = false; this.lastSaved = false; this._setStatus('connecting', null);
     let socket;
@@ -317,7 +318,7 @@ export class CollaborativeBoardStore {
   }
   _reconnect() {
     if (this.destroyed || this.rejected || this._reconnectTimer) return;
-    const delay = Math.min(this.reconnectMax, this.reconnectMin * 2 ** Math.min(this.reconnectAttempts++, 8)) * (0.8 + Math.random() * 0.4);
+    const delay = Math.max(this._retryNotBefore - Date.now(), Math.min(this.reconnectMax, this.reconnectMin * 2 ** Math.min(this.reconnectAttempts++, 8)) * (0.8 + Math.random() * 0.4));
     this._reconnectTimer = this._timer(() => { this._reconnectTimer = null; this._connect(); }, delay);
   }
   _send(message) {
@@ -381,7 +382,7 @@ export class CollaborativeBoardStore {
       this.lastSaved = !this.hasPending && !this.rejected;
       if (this.lastSaved && this._quotaRetrying) { this._quotaRetrying = false; this._quotaDrafts = []; }
       // A transport handshake alone does not mean persistence has recovered.
-      this.reconnectAttempts = 0;
+      this.reconnectAttempts = 0; this._retryNotBefore = 0;
       this._setStatus(this.role === 'viewer' ? 'readonly' : this.lastSaved && !this._remoteQueue.length ? 'synced' : 'syncing', null);
       this._scheduleAckTimeout(); this._persist();
     } else if (message.type === 'presence') {
@@ -397,7 +398,8 @@ export class CollaborativeBoardStore {
         this._sendUpdate(noopUpdate());
       } else this._emitStatus();
     } else if (message.type === 'error') {
-      if (['SAVE_FAILED', 'RATE_LIMIT', 'SERVER_UNAVAILABLE', 'TEMPORARY_FAILURE'].includes(message.code)) {
+      if (['SAVE_FAILED', 'RATE_LIMIT', 'SERVER_UNAVAILABLE', 'SERVER_BUSY', 'TEMPORARY_FAILURE'].includes(message.code)) {
+        if (Number.isFinite(message.retryAfter) && message.retryAfter > 0) this._retryNotBefore = Math.max(this._retryNotBefore, Date.now() + Math.min(message.retryAfter, 60) * 1000);
         this.hasPending = this.hasPending || this.queue.length > 0 || this.pending.size > 0;
         this._persist();
         this._disconnectForRetry(message.message || 'Le serveur est temporairement indisponible ; votre travail reste conservé.');

@@ -1,12 +1,14 @@
-# Collaboration — architecture de la V2.1
+# Collaboration — architecture de la V2.1.1
 
-La V2.1 conserve les tableaux locaux de la V1 et le mode partagé de la V2 ; elle ajoute les recettes de déploiement conteneurisé et de mise à jour du code hors ligne. Un projet partagé appartient au serveur ; les clients manipulent un document Yjs, échangent ses modifications par WebSocket et attendent un accusé de réception durable. Les invitations permettent de rejoindre un projet sans compte ni mot de passe.
+La V2.1.1 conserve les tableaux locaux de la V1 et le mode partagé de la V2, avec déploiement conteneurisé, accès HTTP distant, HTTPS facultatif et mise à jour du code hors ligne. Un projet partagé appartient au serveur ; les clients manipulent un document Yjs, échangent ses modifications par WebSocket et attendent un accusé de réception durable. Les invitations permettent de rejoindre un projet sans compte ni mot de passe.
 
 ## Parcours et identité
 
 `CollaborationClient` appelle les API sur la même origine que l'interface. Un visiteur choisit un nom de 1 à 80 caractères et reçoit une identité aléatoire, distincte de ce nom. Deux personnes portant le même nom restent deux participants différents.
 
 Le serveur reconnaît cette identité grâce au cookie `atelier_session`, `HttpOnly`, `SameSite=Lax`, avec `Secure` en HTTPS. Une session dure 365 jours. Le nom, le rôle et les identifiants affichés dans le navigateur ne prouvent pas une identité : les contrôles du serveur utilisent la session et les droits enregistrés dans SQLite.
+
+En HTTP direct, utiliser `PUBLIC_URL=` et `TRUST_PROXY=0`, ou fixer `PUBLIC_URL` à l'origine HTTP réellement utilisée, port compris. Un cookie `Secure` créé avec une configuration HTTPS ne sera pas transmis par un navigateur en HTTP distant. Le navigateur doit ouvrir l'application, les API et les invitations sur la même origine. Réutiliser un pseudonyme ne retrouve pas une identité dont le cookie a été perdu.
 
 Les projets sont privés. Les rôles sont :
 
@@ -56,7 +58,7 @@ Les réponses sont JSON, sauf les images et les fichiers de l'interface. Les req
 | Route | Fonction |
 | --- | --- |
 | `GET /api/health`, `HEAD /api/health` | Santé du processus et de sa connexion SQLite ; sans session, avec la version du serveur. |
-| `GET /api/session` | Disponibilité de la collaboration et identité courante. |
+| `GET /api/session` | Disponibilité de la collaboration et identité courante ; `200` et `user: null` sans session valide. |
 | `POST /api/session` | Créer une identité invitée avec `{ name }`. |
 | `PATCH /api/session` | Modifier son nom avec `{ name }`. |
 | `DELETE /api/session` | Fermer la session et ses connexions actives. |
@@ -76,9 +78,11 @@ Les réponses sont JSON, sauf les images et les fichiers de l'interface. Les req
 
 Les opérations de gestion d'invitations appartiennent au propriétaire. Connaître un identifiant de projet ou une URL d'image ne suffit pas à accéder à un projet privé : le serveur vérifie son appartenance.
 
+Un contrôle d'origine refuse une requête venant d'une autre origine avec `403 ORIGIN_FORBIDDEN`. Quand `PUBLIC_URL` est défini, le protocole, l'hôte et le port doivent correspondre à l'adresse utilisée. En HTTP direct avec `PUBLIC_URL` vide, la référence est l'en-tête `Host` de la requête ; les en-têtes de proxy sont ignorés lorsque `TRUST_PROXY=0`. Une action nécessitant une identité, avec un cookie absent ou expiré, renvoie `401 SESSION_REQUIRED`. Ces réponses correspondent à des causes différentes ; voir le [diagnostic de déploiement](deploy/DEPLOYMENT.md#diagnostiquer-les-erreurs-de-session-et-dorigine).
+
 ## WebSocket et confirmation durable
 
-Chaque tableau utilise `/api/boards/:id/live`, en `ws:` pour le développement local et `wss:` derrière HTTPS. Le serveur vérifie la session, l'appartenance au projet et l'origine à la connexion. Les droits de modification sont aussi contrôlés pendant la vie de la connexion.
+Chaque tableau utilise `/api/boards/:id/live`, en `ws:` en HTTP direct et `wss:` derrière HTTPS. Le serveur vérifie la session, l'appartenance au projet et l'origine à la connexion. Les droits de modification sont aussi contrôlés pendant la vie de la connexion.
 
 Les messages sont des objets JSON. Les états, différences et vecteurs Yjs sont des données binaires encodées en base64 :
 
@@ -99,13 +103,15 @@ L'état `synced` et `lastSaved` n'est atteint qu'après réception des accusés 
 
 La présence est éphémère. Les curseurs et sélections utilisent les coordonnées du tableau, avec l'identité fournie par le serveur. Ils ne font pas partie du document, du stockage durable ou de l'historique d'annulation. La vue, le mode présentation et le minuteur restent personnels ; le minuteur n'est pas synchronisé.
 
+Les notifications de déplacement sont regroupées sur une fenêtre de 75 ms pour éviter une diffusion complète à chaque mouvement de curseur. Les changements de participants et les mises à jour du document conservent leur propre traitement.
+
 ## Déconnexion et cache de récupération
 
 `IndexedDBCollaborationCache` conserve des snapshots Yjs dans la base `atelier-board:collaboration:v2`, avec une clé composée de l'identité invitée et du projet. Les écritures sont sérialisées afin qu'une sauvegarde ancienne ne remplace pas une sauvegarde récente. `cacheSaved` représente cette sauvegarde locale ; `lastSaved` représente la confirmation du serveur.
 
 Au chargement d'un projet, le store restaure le cache avant d'ouvrir le WebSocket, puis fusionne les changements. La reconnexion est automatique, avec délai progressif et variation aléatoire. Il est possible de continuer à modifier un tableau déjà ouvert pendant une coupure réseau, si le droit local permet encore l'édition.
 
-Les erreurs temporaires `SAVE_FAILED`, `RATE_LIMIT`, `SERVER_UNAVAILABLE` et `TEMPORARY_FAILURE` gardent les changements en attente et déclenchent une reconnexion avec délai progressif. Elles ne constituent pas une sauvegarde confirmée et ne bloquent pas définitivement le client.
+Les erreurs temporaires `SAVE_FAILED`, `RATE_LIMIT`, `SERVER_UNAVAILABLE`, `SERVER_BUSY` et `TEMPORARY_FAILURE` gardent les changements en attente et déclenchent une reconnexion avec délai progressif. Elles ne constituent pas une sauvegarde confirmée et ne bloquent pas définitivement le client. Un refus de surcharge après vérification des droits indique `retryable: true` et un délai de nouvelle tentative de deux secondes, puis ferme la connexion avec le code WebSocket `1013`.
 
 L'erreur `QUOTA_EXCEEDED` conserve le brouillon, suspend l'édition et place le client dans l'état `quota`, sans confirmation de sauvegarde ni nouvelles tentatives automatiques. Après avoir libéré de la capacité, **Réessayer la synchronisation** rétablit la connexion, vérifie de nouveau les droits et propose les changements manquants. Le refus ne donne aucun droit supplémentaire : un accès retiré ou devenu lecteur empêche toujours le renvoi du brouillon. L'export de récupération reste disponible pendant ce blocage.
 
@@ -153,11 +159,30 @@ Une image reste comptée jusqu'à la suppression du projet, même quand son él�
 
 Ces quotas ne représentent pas la taille complète de `DATA_DIR` : ils n'incluent pas les métadonnées, les journaux SQLite ni l'espace physique de la base. Prévoir la surveillance et les limites de disque de l'hébergeur. Le quota par invité n'est pas une limite par personne vérifiée : une nouvelle identité navigateur peut le contourner, tandis que le quota global reste appliqué. Ce mécanisme ne constitue pas une protection contre les abus ou le déni de service.
 
+### Capacité et admission
+
+Les limites d'admission complètent les quotas de disque et les limites de fréquence des mises à jour :
+
+| Variable | Défaut | Portée |
+| --- | --- | --- |
+| `MAX_CONNECTIONS` | `500` | Connexions WebSocket simultanées pour tout le serveur. |
+| `MAX_CONNECTIONS_PER_BOARD` | `50` | Connexions simultanées à un projet. |
+| `MAX_CONNECTIONS_PER_USER` | `12` | Connexions simultanées d'une identité invitée, tous projets confondus. |
+| `MAX_ACTIVE_BOARDS` | `100` | Projets distincts avec au moins une connexion WebSocket. |
+| `MAX_IDLE_BOARDS` | `100` | Documents sans connexion conservés dans le cache mémoire. |
+| `SESSION_CREATIONS_PER_MINUTE` | `120` | Créations de sessions par adresse IP en une minute. |
+| `WEBSOCKET_CONNECTIONS_PER_MINUTE` | `300` | Tentatives de connexion WebSocket par adresse IP en une minute. |
+| `INVITATION_JOINS_PER_MINUTE` | `300` | Admissions par invitation par adresse IP en une minute. |
+
+Ces variables acceptent des entiers strictement positifs ; une configuration invalide empêche le démarrage. Les limites par IP concernent aussi les groupes qui partagent une même sortie réseau. Chaque onglet connecté consomme une connexion. Les tableaux inactifs peuvent quitter le cache et être relus depuis SQLite ; atteindre la taille du cache ne supprime aucun projet et n'empêche pas une consultation HTTP ponctuelle.
+
+Un refus d'admission ne confirme aucune modification et ne diffuse pas de contenu privé à un visiteur non autorisé. Les brouillons des participants restent conservés par le client pendant ses nouvelles tentatives. Le benchmark `npm run load:test` utilise une installation temporaire séparée pour mesurer le comportement sous charge et contrôler la convergence ; ses résultats ne définissent pas une capacité universelle du serveur.
+
 ## Déploiement et portée
 
-La V2.1 demande un processus Node.js 24 avec disque persistant et un proxy HTTPS compatible WebSocket. `PUBLIC_URL` doit désigner l'origine publique du site. `TRUST_PROXY` ne doit être activé que derrière un proxy de confiance, avec un accès direct au serveur fermé. Voir [README.md](README.md), [.env.example](.env.example) et [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md).
+La V2.1.1 demande un processus Node.js 24 avec disque persistant. La recette Docker publie `http://ADRESSE_DU_SERVEUR:3000` sur `0.0.0.0` par défaut. `PUBLIC_URL` peut rester vide en HTTP direct, ou désigner exactement l'origine publique du site. HTTPS peut être ajouté avec un proxy compatible WebSocket ; `TRUST_PROXY` ne doit être activé que derrière un proxy de confiance, avec un accès direct au serveur fermé. Voir [README.md](README.md), [.env.example](.env.example) et [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md).
 
-Cette implémentation fonctionne avec une seule instance serveur. Plusieurs processus n'ont pas de canal commun pour les documents en mémoire et les WebSockets. Une montée en charge horizontale demanderait un stockage et une coordination supplémentaires ; elle ne consiste pas à ajouter des réplicas sur le fichier SQLite actuel.
+Cette implémentation fonctionne avec une seule instance serveur. Ne pas utiliser `docker compose up --scale atelier=…` avec le même volume. Plusieurs processus n'ont pas de canal commun pour les documents en mémoire et les WebSockets et pourraient écraser leurs états respectifs dans SQLite. Une montée en charge horizontale demanderait un stockage et une coordination supplémentaires. La capacité de cette version se règle sur une instance, avec mesures de charge et surveillance de sa mémoire, de son CPU et du disque.
 
 Le site statique V1 ne sert pas ce serveur. ChatGPT Sites déploie son code serveur dans Cloudflare Workers et propose D1/R2 ; cette implémentation Node/SQLite ne s'y publie pas telle quelle. La livraison du code V2.1 ne modifie pas automatiquement l'application V1 en ligne.
 

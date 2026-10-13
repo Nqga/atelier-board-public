@@ -188,7 +188,8 @@ validate_destination() {
   local project version
   project=$(sed -n 's/^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$target/package.json" | sed -n '1p')
   version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$target/package.json" | sed -n '1p')
-  [[ "$project" == 'atelier-board' && ( "$version" =~ ^2\.0\.[0-9]+$ || "$version" == "$target_version" ) ]] || fail "La destination doit être Atelier Board v2.0.x ou v$target_version."
+  # v2.1.0 is the released container baseline; never replace a newer release.
+  [[ "$project" == 'atelier-board' && ( "$version" =~ ^2\.0\.[0-9]+$ || "$version" == '2.1.0' || "$version" == "$target_version" ) ]] || fail "La destination doit être Atelier Board v2.0.x, v2.1.0 ou v$target_version."
   while IFS=$'\t' read -r checksum mode path; do check_target_path "$path"; done < "$payload/$manifest_name"
 }
 

@@ -1,6 +1,6 @@
 services:
   atelier:
-    image: atelier-board:2.1.0
+    image: atelier-board:2.1.1
     build: .
     restart: unless-stopped
     init: true
@@ -13,17 +13,25 @@ services:
     security_opt:
       - no-new-privileges:true
     ports:
-      - "127.0.0.1:${PORT:-3000}:3000"
+      - "${BIND_ADDRESS:-0.0.0.0}:${PORT:-3000}:3000"
     environment:
       NODE_ENV: production
       PORT: "3000"
       HOST: 0.0.0.0
       DATA_DIR: /data
-      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:3000}
+      PUBLIC_URL: ${PUBLIC_URL:-}
       TRUST_PROXY: ${TRUST_PROXY:-0}
       MAX_BOARDS_PER_GUEST: ${MAX_BOARDS_PER_GUEST:-20}
       MAX_BOARD_STORAGE_MB: ${MAX_BOARD_STORAGE_MB:-100}
       MAX_TOTAL_STORAGE_MB: ${MAX_TOTAL_STORAGE_MB:-1024}
+      MAX_CONNECTIONS: ${MAX_CONNECTIONS:-500}
+      MAX_CONNECTIONS_PER_BOARD: ${MAX_CONNECTIONS_PER_BOARD:-50}
+      MAX_CONNECTIONS_PER_USER: ${MAX_CONNECTIONS_PER_USER:-12}
+      MAX_ACTIVE_BOARDS: ${MAX_ACTIVE_BOARDS:-100}
+      MAX_IDLE_BOARDS: ${MAX_IDLE_BOARDS:-100}
+      SESSION_CREATIONS_PER_MINUTE: ${SESSION_CREATIONS_PER_MINUTE:-120}
+      INVITATION_JOINS_PER_MINUTE: ${INVITATION_JOINS_PER_MINUTE:-300}
+      WEBSOCKET_CONNECTIONS_PER_MINUTE: ${WEBSOCKET_CONNECTIONS_PER_MINUTE:-300}
     volumes:
       - atelier-data:/data
     healthcheck:

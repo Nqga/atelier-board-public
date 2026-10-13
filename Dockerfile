@@ -3,7 +3,7 @@ FROM node:24-alpine
 
 LABEL org.opencontainers.image.title="Atelier Board" \
       org.opencontainers.image.description="Tableau visuel collaboratif web" \
-      org.opencontainers.image.version="2.1.0" \
+      org.opencontainers.image.version="2.1.1" \
       org.opencontainers.image.source="https://github.com/Nqga/atelier-board-public" \
       org.opencontainers.image.licenses="MIT"
 

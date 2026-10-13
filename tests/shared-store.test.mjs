@@ -693,3 +693,45 @@ test('access-denied recovery isolates corrupt snapshots and failed cache reads',
   const damagedOnly = new MemoryCache(); await damagedOnly.set('alice:shared-board', { state: 'invalid' });
   assert.equal(await CollaborativeBoardStore.recover('shared-board', { user: { id: 'alice' }, cache: damagedOnly }), null);
 });
+
+test('server capacity refusals respect retry delay and retain a draft until a durable ACK', async t => {
+  const initial = docFromBoard(baseBoard()), cache = new MemoryCache();
+  const store = await openStore(initial, { cache, reconnectMin: 2, reconnectMax: 2 });
+  t.after(() => { store.destroy(); initial.destroy(); });
+  const first = store.socket; sync(first, initial); ackLast(first);
+  store.replaceText('note-1', 'Équipe en attente de capacité'); await store.save();
+  first.receive({ type: 'error', code: 'SERVER_BUSY', retryable: true, retryAfter: 0.05, message: 'Le serveur est momentanément occupé.' });
+  await store._cacheChain;
+  assert.equal(store.rejected, false); assert.equal(store.hasPending, true); assert.equal(store.lastSaved, false);
+  assert.equal(store.recoveryDraft, undefined); assert.equal(store.status, 'offline');
+  assert.equal((await cache.get(store.cacheKey)).rejected, false);
+  store._onlineHandler(); store._connect();
+  assert.equal(store.socket, null, 'online events cannot bypass the advertised retry delay');
+  const deadline = Date.now() + 1000;
+  while (!store.socket && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(store.socket); assert.notEqual(store.socket, first); assert.equal(store.lastSaved, false);
+  sync(store.socket, initial);
+  const update = store.socket.sent.find(message => message.type === 'update');
+  Y.applyUpdate(initial, decodeBase64(update.update));
+  assert.equal(boardFromDoc(initial, 'shared-board').objects[0].text, 'Équipe en attente de capacité');
+  assert.equal(store.lastSaved, false);
+  ackLast(store.socket); await store._cacheChain;
+  assert.equal(store.lastSaved, true); assert.equal(store.hasPending, false); assert.equal(store._retryNotBefore, 0);
+});
+
+test('a capacity retry rechecks permissions before sending and never replays a now read-only draft', async t => {
+  const initial = docFromBoard(baseBoard()), store = await openStore(initial, { reconnectMin: 2, reconnectMax: 2 });
+  t.after(() => { store.destroy(); initial.destroy(); });
+  sync(store.socket, initial); ackLast(store.socket);
+  store.replaceText('note-1', 'Brouillon avant changement de rôle'); await store.save();
+  store.socket.receive({ type: 'error', code: 'SERVER_BUSY', retryable: true, message: 'Capacité temporairement atteinte.' });
+  const deadline = Date.now() + 1000;
+  while (!store.socket && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(store.socket); const fresh = store.socket;
+  sync(fresh, initial, 'viewer');
+  assert.equal(store.status, 'readonly'); assert.equal(store.rejected, true); assert.equal(store.canEdit, false);
+  assert.equal(fresh.sent.some(message => message.type === 'update'), false);
+  assert.equal(store.recoveryDraft.board.objects[0].text, 'Brouillon avant changement de rôle');
+  fresh.close(1013); store._onlineHandler();
+  assert.equal(store.socket, null); assert.equal(store._reconnectTimer, null);
+});

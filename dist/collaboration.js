@@ -1,7 +1,10 @@
 /** Same-origin HTTP service. Access tokens stay in HttpOnly server cookies. */
 export class CollaborationClient {
-  constructor() { this.user = null; this.available = false; this.projects = []; }
+  constructor() { this.user = null; this.available = false; this.projects = []; this.lastError = null; this.sessionVersion = 0; this.initVersion = 0; this.sessionPending = null; }
+  _clearSession() { this.user = null; this.projects = []; this.sessionVersion++; }
+  _acceptSession(user) { this.user = user || null; if (!this.user) this.projects = []; this.sessionVersion++; return this.user; }
   async request(path, { method = 'GET', body, raw = false, headers = {}, timeout = 15000 } = {}) {
+    const sessionVersion = this.sessionVersion;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
@@ -12,7 +15,9 @@ export class CollaborationClient {
       const data = isJSON ? await response.json() : null;
       if (!response.ok || !isJSON) {
         const error = new Error(data?.message || data?.error || (response.status === 404 ? 'Le service de collaboration est indisponible sur cette adresse.' : `Cette action n’a pas pu être effectuée (${response.status}).`));
-        error.status = response.status; error.code = data?.code; throw error;
+        error.status = response.status; error.code = data?.code;
+        if (response.status === 401 && error.code === 'SESSION_REQUIRED' && sessionVersion === this.sessionVersion) { this._clearSession(); error.sessionInvalidatedVersion = this.sessionVersion; }
+        throw error;
       }
       return data;
     } catch (error) {
@@ -22,30 +27,56 @@ export class CollaborationClient {
     } finally { clearTimeout(timer); }
   }
   async init() {
-    const knownUser = this.user;
-    try { const data = await this.request('/api/session'); this.available = data.collaboration !== false; if (this.user === knownUser) this.user = data.user || null; return this.user; }
-    catch { this.available = false; return null; }
+    const sessionVersion = this.sessionVersion, initVersion = ++this.initVersion;
+    try {
+      const data = await this.request('/api/session');
+      if (initVersion === this.initVersion && sessionVersion === this.sessionVersion) { this.available = data.collaboration !== false; this.lastError = null; this._acceptSession(data.user); }
+      return this.user;
+    } catch (error) {
+      if (initVersion === this.initVersion && (sessionVersion === this.sessionVersion || error.sessionInvalidatedVersion === this.sessionVersion)) { this.available = false; this.lastError = error; if (sessionVersion === this.sessionVersion) this._clearSession(); }
+      return this.user;
+    }
   }
-  async ensureSession(name) {
-    if (this.sessionPending) { await this.sessionPending; if (name && this.user?.name !== name.trim()) await this.setName(name); return this.user; }
-    this.sessionPending = this._ensureSession(name);
-    try { return await this.sessionPending; } finally { this.sessionPending = null; }
+  _sessionTask(action) {
+    // A failed operation releases the queue without replaying it. The next
+    // explicit action can create a fresh guest, with no old memberships.
+    const task = (this.sessionPending || Promise.resolve()).catch(() => {}).then(action);
+    const pending = task.finally(() => { if (this.sessionPending === pending) this.sessionPending = null; });
+    this.sessionPending = pending;
+    return pending;
   }
+  ensureSession(name) { return this._sessionTask(() => this._ensureSession(name)); }
   async _ensureSession(name) {
-    if (!this.available) { await this.init(); if (!this.available) throw new Error('Le partage nécessite le serveur de collaboration. Ouvrez l’application avec son serveur V2.'); }
-    if (this.user) { if (name && name.trim() !== this.user.name) await this.setName(name); return this.user; }
+    if (!this.available) { await this.init(); if (!this.available) throw this.lastError || new Error('Le partage nécessite le serveur de collaboration. Ouvrez l’application avec son serveur V2.'); }
+    if (this.user) { if (name && name.trim() !== this.user.name) return this._setName(name); return this.user; }
     const data = await this.request('/api/session', { method: 'POST', body: { name: (name || 'Vous').trim().slice(0, 80) } });
-    this.user = data.user; return this.user;
+    // A Secure cookie over HTTP, blocked cookies or a changed server address
+    // can make POST succeed while every protected request still returns 401.
+    // Verify once before allowing a project write; never loop creating guests.
+    const verified = await this.request('/api/session');
+    if (!data.user?.id || verified.user?.id !== data.user.id) {
+      this._clearSession();
+      const error = new Error('Votre session n’a pas été conservée. Autorisez les cookies pour cette adresse et ouvrez le lien avec la même adresse et le même protocole que le serveur.');
+      error.code = 'SESSION_COOKIE_MISSING'; throw error;
+    }
+    this._acceptSession(verified.user); this.lastError = null; return this.user;
   }
-  async setName(name) {
-    if (!this.user) return this.ensureSession(name);
-    const data = await this.request('/api/session', { method: 'PATCH', body: { name: name.trim().slice(0, 80) } });
-    this.user = data.user; return this.user;
+  setName(name) { return this._sessionTask(() => this._setName(name)); }
+  async _setName(name) {
+    if (!this.user) return this._ensureSession(name);
+    try {
+      const data = await this.request('/api/session', { method: 'PATCH', body: { name: name.trim().slice(0, 80) } });
+      this._acceptSession(data.user); return this.user;
+    } catch (error) {
+      if (error.status === 401 && error.code === 'SESSION_REQUIRED') return this._ensureSession(name);
+      throw error;
+    }
   }
   async refreshProjects() {
     if (!this.user) { this.projects = []; return this.projects; }
+    const sessionVersion = this.sessionVersion;
     const data = await this.request('/api/boards');
-    this.projects = (data.boards || []).map(board => ({ ...board, shared: true })); return this.projects;
+    if (sessionVersion === this.sessionVersion) this.projects = (data.boards || []).map(board => ({ ...board, shared: true })); return this.projects;
   }
   async createBoard(board) { await this.ensureSession(); return this.request('/api/boards', { method: 'POST', body: { board } }); }
   getBoard(id) { return this.request(`/api/boards/${encodeURIComponent(id)}`); }

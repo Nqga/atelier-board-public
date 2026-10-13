@@ -422,6 +422,43 @@ test('Cross-origin HTTP writes and WebSocket connections are rejected', async t 
   assert.equal((await owner.request('/api/session')).data.user.name, 'Alice');
 });
 
+test('Direct address-plus-port access establishes an HTTP guest cookie and rejects mismatched configured origins explicitly', async t => {
+  const environment = await fixture(t, { host: '0.0.0.0' });
+  const remoteOrigin = `http://127.0.0.2:${environment.instance.server.address().port}`;
+  const headers = { Origin: remoteOrigin, 'Content-Type': 'application/json' };
+  const response = await fetch(remoteOrigin + '/api/session', { method: 'POST', headers, body: JSON.stringify({ name: 'Invité distant' }) });
+  assert.equal(response.status, 201);
+  const payload = await response.json();
+  const cookie = response.headers.getSetCookie()[0];
+  assert.match(cookie, /HttpOnly/);
+  assert.doesNotMatch(cookie, /; Secure/);
+  const checked = await fetch(remoteOrigin + '/api/session', { headers: { Cookie: cookie.split(';')[0] } });
+  assert.equal(checked.status, 200);
+  assert.equal((await checked.json()).user.id, payload.user.id);
+  const mismatch = await fetch(remoteOrigin + '/api/session', { method: 'POST', headers: { ...headers, Origin: 'http://localhost:3000' }, body: JSON.stringify({ name: 'Adresse différente' }) });
+  assert.equal(mismatch.status, 403);
+  const error = await mismatch.json();
+  assert.equal(error.code, 'ORIGIN_FORBIDDEN');
+  assert.match(error.message, /PUBLIC_URL/);
+  assert.match(error.message, /protocole, adresse et port/);
+  assert.equal((await new Browser(environment).request('/api/session')).status, 200, 'Anonymous session discovery is not a 401');
+  assert.equal((await new Browser(environment).request('/api/boards')).status, 401, 'Protected projects require the established guest cookie');
+});
+
+test('Explicit HTTPS PUBLIC_URL remains strict and emits Secure cookies even if its backend transport is HTTP', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'atelier-origin-test-'));
+  const instance = await createAtelierServer({ port: 0, host: '127.0.0.1', dataDir, publicUrl: 'https://board.example.com' });
+  await instance.start();
+  t.after(async () => { await instance.close(); await rm(dataDir, { recursive: true, force: true }); });
+  const url = `http://127.0.0.1:${instance.server.address().port}`;
+  const response = await fetch(url + '/api/session', { method: 'POST', headers: { Origin: 'https://board.example.com', 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'HTTPS guest' }) });
+  assert.equal(response.status, 201);
+  assert.match(response.headers.getSetCookie()[0], /; Secure/);
+  const wrong = await fetch(url + '/api/session', { method: 'POST', headers: { Origin: 'http://board.example.com:3000', 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Wrong configuration' }) });
+  assert.equal(wrong.status, 403);
+  assert.equal((await wrong.json()).code, 'ORIGIN_FORBIDDEN');
+});
+
 test('Uploaded images are signature-checked and restricted to project members; static paths cannot escape dist', async t => {
   const { environment, owner, boardId } = await participants(t);
   const outsider = await new Browser(environment).become('Sans accès');

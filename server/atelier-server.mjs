@@ -8,6 +8,7 @@ import { Y, docFromBoard, boardFromDoc } from '../dist/shared-model.js';
 import { validateBoard } from '../dist/store.js';
 import { openDatabase, transaction, MAX_RETAINED_UPDATES } from './database.mjs';
 import { normalizeQuotas, createQuotaManager } from './quotas.mjs';
+import { normalizeCapacity, serverBusy } from './capacity.mjs';
 import { ApiError, fail, UUID, TOKEN, COOKIE, ROLES, randomToken, hash, requireId, nameOf, cookieToken, decodeUpdate, readBody, readJSON, imageMime, RateLimiter } from './security.mjs';
 
 const DAY = 86400000;
@@ -22,6 +23,7 @@ const base64 = value => Buffer.from(value).toString('base64');
 /** One durable SQLite writer and one authoritative Yjs document per active room. */
 export async function createAtelierServer(options = {}) {
   const quotaLimits = normalizeQuotas(options.quotas);
+  const capacity = normalizeCapacity(options.capacity);
   const dataDir = resolve(options.dataDir || './data');
   const staticDir = resolve(import.meta.dirname, '../dist');
   const host = options.host || '127.0.0.1';
@@ -62,7 +64,7 @@ export async function createAtelierServer(options = {}) {
       if (req.headers['sec-fetch-site'] === 'cross-site') fail(403, 'ORIGIN_FORBIDDEN', 'Cette origine n’est pas autorisée.');
       return;
     }
-    if (origin !== requestOrigin(req)) fail(403, 'ORIGIN_FORBIDDEN', 'Cette origine n’est pas autorisée.');
+    if (origin !== requestOrigin(req)) fail(403, 'ORIGIN_FORBIDDEN', 'L’adresse du navigateur ne correspond pas à celle du serveur. Vérifiez PUBLIC_URL : protocole, adresse et port doivent correspondre exactement (par exemple http://adresse-du-serveur:3000). Pour un accès direct par adresse, vous pouvez laisser PUBLIC_URL vide.');
   }
   function secureCookie(req) { return requestOrigin(req).startsWith('https:'); }
   function sessionCookie(req, token, clear = false) {
@@ -95,13 +97,15 @@ export async function createAtelierServer(options = {}) {
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...extraHeaders });
     res.end(JSON.stringify(payload));
   }
-  function send(socket, payload) {
+  function sendEncoded(socket, message) {
     if (socket.readyState !== WebSocket.OPEN) return;
     if (socket.bufferedAmount > MAX_STATE_BYTES * 2) { socket.close(1013, 'Connexion trop lente.'); return; }
-    socket.send(JSON.stringify(payload));
+    socket.send(message);
   }
+  function send(socket, payload) { sendEncoded(socket, JSON.stringify(payload)); }
   function broadcast(room, payload, excluded = null) {
-    for (const socket of room.sockets) if (socket !== excluded) send(socket, payload);
+    const message = JSON.stringify(payload);
+    for (const socket of room.sockets) if (socket !== excluded) sendEncoded(socket, message);
   }
   function roomUsers(room) {
     return [...room.sockets].filter(socket => socket.readyState === WebSocket.OPEN).map(socket => ({
@@ -110,19 +114,42 @@ export async function createAtelierServer(options = {}) {
       editing: socket.presence.editing,
     }));
   }
-  function presence(room) { broadcast(room, { type: 'presence', users: roomUsers(room) }); }
+  function presence(room) {
+    clearTimeout(room.presenceTimer);
+    room.presenceTimer = null;
+    broadcast(room, { type: 'presence', users: roomUsers(room) });
+  }
+  function schedulePresence(room) {
+    // A burst of cursor changes produces one room snapshot per interval,
+    // instead of broadcasting the whole participant list for every cursor.
+    if (room.presenceTimer) return;
+    room.presenceTimer = setTimeout(() => presence(room), 75);
+    room.presenceTimer.unref();
+  }
+  function destroyRoom(room) {
+    clearTimeout(room.presenceTimer);
+    room.presenceTimer = null;
+    room.doc.destroy();
+    if (rooms.get(room.id) === room) rooms.delete(room.id);
+  }
   function cacheRoom(room) {
-    // HTTP-only project previews must not retain an unlimited number of documents.
-    if (rooms.size >= 100) {
+    // Idle HTTP previews and active collaborative rooms have separate bounds.
+    // Even when every active slot is occupied, a preview evicts another idle
+    // document instead of growing the cache indefinitely.
+    const idleCount = [...rooms.values()].filter(value => !value.sockets.size).length;
+    if (idleCount >= capacity.maxIdleBoards) {
       for (const [id, idle] of rooms) {
-        if (!idle.sockets.size) { idle.doc.destroy(); rooms.delete(id); break; }
+        if (!idle.sockets.size) { destroyRoom(idle); break; }
       }
     }
     rooms.set(room.id, room);
   }
   function getRoom(boardId) {
     let room = rooms.get(boardId);
-    if (room) return room;
+    if (room) {
+      if (!room.sockets.size) { rooms.delete(boardId); rooms.set(boardId, room); }
+      return room;
+    }
     const row = db.prepare('SELECT * FROM boards WHERE id=?').get(boardId);
     if (!row) fail(404, 'BOARD_NOT_FOUND', 'Projet introuvable.');
     const doc = new Y.Doc();
@@ -201,10 +228,10 @@ export async function createAtelierServer(options = {}) {
     if (parts.length === 2 && parts[1] === 'session') {
       if (req.method === 'GET') return json(res, 200, sessionPayload(authenticate(req, false)));
       if (req.method === 'POST') {
-        if (!limiter.allow(`session:${ip}`, 30)) fail(429, 'RATE_LIMIT', 'Trop de nouvelles sessions. Réessayez dans un instant.');
         const body = await readJSON(req, 4096);
         const existing = authenticate(req, false);
         if (existing) return json(res, 200, sessionPayload(existing));
+        if (!limiter.allow(`session:${ip}`, capacity.sessionCreationsPerMinute)) fail(429, 'RATE_LIMIT', 'Trop de nouvelles sessions. Réessayez dans un instant.');
         const name = nameOf(body.name);
         const token = randomToken();
         const user = { id: randomUUID(), name, color: COLORS[Math.floor(Math.random() * COLORS.length)] };
@@ -239,7 +266,7 @@ export async function createAtelierServer(options = {}) {
       fail(405, 'METHOD_NOT_ALLOWED', 'Méthode non prise en charge.');
     }
     if (parts[1] === 'invitations' && parts[2] === 'join' && parts.length === 3 && req.method === 'POST') {
-      if (!limiter.allow(`join:${ip}`, 60)) fail(429, 'RATE_LIMIT', 'Trop de tentatives d’invitation.');
+      if (!limiter.allow(`join:${ip}`, capacity.invitationJoinsPerMinute)) fail(429, 'RATE_LIMIT', 'Trop de tentatives d’invitation.');
       const body = await readJSON(req, 4096);
       const session = authenticate(req);
       if (typeof body.token !== 'string' || !TOKEN.test(body.token)) fail(404, 'INVITATION_INVALID', 'Ce lien d’invitation est invalide, expiré ou révoqué.');
@@ -293,7 +320,7 @@ export async function createAtelierServer(options = {}) {
           db.prepare('DELETE FROM boards WHERE id=?').run(boardId);
         });
         const room = rooms.get(boardId);
-        if (room) { for (const socket of room.sockets) socket.close(1008, 'Projet supprimé.'); room.doc.destroy(); rooms.delete(boardId); }
+        if (room) { for (const socket of room.sockets) socket.close(1008, 'Projet supprimé.'); destroyRoom(room); }
         await Promise.all(assets.map(asset => quotas.cleanupAsset(asset.id)));
         return json(res, 200, { ok: true });
       }
@@ -541,16 +568,26 @@ export async function createAtelierServer(options = {}) {
     if (editing !== null && !objectId(editing)) fail(400, 'INVALID_PRESENCE', 'Édition active invalide.');
     socket.presence = { cursor: cursor ? { x: cursor.x, y: cursor.y } : null, selection: [...new Set(selection)], editing };
     socket.presenceAt = now();
-    presence(socket.room);
+    schedulePresence(socket.room);
   }
-  function denyLive(req, socket, head, code, message) {
+  const MAX_REJECTION_TRANSPORTS = 16;
+  function denyLive(req, socket, head, code, message, closeCode = 1008) {
     // Browsers hide HTTP upgrade failures as 1006. An explicit policy close
     // lets a disconnected editor preserve its draft and stop reconnecting.
     // This socket never joins a room or receives any project data/presence.
+    // A browser needs an explicit WebSocket error to distinguish capacity from
+    // a revoked membership. Keep these closing transports bounded as well.
+    if ([...wss.clients].filter(client => client.rejected).length >= MAX_REJECTION_TRANSPORTS) {
+      socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nRetry-After: 2\r\nContent-Length: 0\r\n\r\n');
+      return;
+    }
     wss.handleUpgrade(req, socket, head, client => {
+      client.rejected = true;
       client.on('error', () => {});
-      send(client, { type: 'error', code, message });
-      client.close(1008, message);
+      send(client, { type: 'error', code, message, ...(closeCode === 1013 ? { retryable: true, retryAfter: 2 } : {}) });
+      // RFC 6455 restricts the reason to 123 UTF-8 bytes. The complete
+      // actionable explanation has already been sent in the JSON message.
+      client.close(closeCode, closeCode === 1013 ? 'Serveur occupé. Réessayez dans un instant.' : 'Accès au projet refusé.');
       const timeout = setTimeout(() => client.terminate(), 1000);
       timeout.unref();
       client.once('close', () => clearTimeout(timeout));
@@ -558,11 +595,11 @@ export async function createAtelierServer(options = {}) {
   }
   server.on('upgrade', (req, socket, head) => {
     try {
+      if (closed) throw serverBusy('Le serveur redémarre. Réessayez dans un instant.');
       const pathname = new URL(req.url, 'http://localhost').pathname;
       const match = /^\/api\/boards\/([0-9a-f-]{36})\/live$/i.exec(pathname);
       if (!match) fail(404, 'NOT_FOUND', 'Connexion introuvable.');
       checkOrigin(req, true);
-      if (!limiter.allow(`websocket:${requestIP(req)}`, 60)) fail(429, 'RATE_LIMIT', 'Trop de connexions.');
       const boardId = requireId(match[1]);
       let session, role;
       try { session = authenticate(req); role = membership(boardId, session.user.id); }
@@ -571,8 +608,18 @@ export async function createAtelierServer(options = {}) {
         if (error instanceof ApiError && error.code === 'BOARD_NOT_FOUND') return denyLive(req, socket, head, 'FORBIDDEN', 'Projet introuvable ou accès retiré.');
         throw error;
       }
+      let busy = null;
+      const transports = [...wss.clients];
+      if (!limiter.allow(`websocket:${requestIP(req)}`, capacity.websocketConnectionsPerMinute)) busy = serverBusy('Trop de tentatives de connexion depuis cette adresse. Réessayez dans un instant.');
+      else if (transports.length >= capacity.maxConnections) busy = serverBusy();
+      else if (transports.filter(client => client.user?.id === session.user.id).length >= capacity.maxConnectionsPerUser) busy = serverBusy('Trop d’onglets collaboratifs sont ouverts pour ce participant. Fermez un autre onglet puis réessayez.');
+      else if (transports.filter(client => client.room?.id === boardId).length >= capacity.maxConnectionsPerBoard) busy = serverBusy('Ce projet a atteint sa limite de participants connectés. Réessayez lorsqu’une place se libère.');
+      else {
+        const activeBoards = new Set(transports.filter(client => client.room).map(client => client.room.id));
+        if (!activeBoards.has(boardId) && activeBoards.size >= capacity.maxActiveBoards) busy = serverBusy('La limite de projets actifs du serveur est atteinte. Réessayez dans un instant.');
+      }
+      if (busy) return denyLive(req, socket, head, busy.code, busy.message, 1013);
       const room = getRoom(boardId);
-      if ([...room.sockets].filter(client => client.user.id === session.user.id).length >= 12) fail(429, 'RATE_LIMIT', 'Trop de connexions simultanées pour ce participant.');
       wss.handleUpgrade(req, socket, head, client => {
         client.room = room; client.role = role; client.user = { ...session.user }; client.tokenHash = session.tokenHash;
         client.expiresAt = session.expiresAt; client.connectionId = randomUUID(); client.isAlive = true;
@@ -607,7 +654,7 @@ export async function createAtelierServer(options = {}) {
         client.on('close', () => {
           room.sockets.delete(client);
           presence(room);
-          if (!room.sockets.size && rooms.get(room.id) === room) { room.doc.destroy(); rooms.delete(room.id); }
+          if (!room.sockets.size && rooms.get(room.id) === room) destroyRoom(room);
         });
         client.on('error', () => { /* Close handler removes ephemeral presence. */ });
       });
@@ -661,7 +708,7 @@ export async function createAtelierServer(options = {}) {
       // finished. Wait for the route's rollback/cleanup before closing SQLite or
       // allowing a replacement process to reconcile its reservations.
       await Promise.allSettled([...activeRequests]);
-      for (const room of rooms.values()) room.doc.destroy();
+      for (const room of rooms.values()) destroyRoom(room);
       rooms.clear();
       db.close();
     })();

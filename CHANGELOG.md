@@ -1,5 +1,13 @@
 # Historique des versions
 
+## 2.1.1
+
+- Accès HTTP distant sur `0.0.0.0:3000` par défaut avec Docker Compose ; adresse d'écoute configurable et contrôle d'origine basé sur l'adresse utilisée lorsque `PUBLIC_URL` est vide.
+- Documentation du parcours à deux navigateurs : création d'une identité invitée, partage par lien, synchronisation et persistance ; diagnostic distinct des erreurs `401 SESSION_REQUIRED` et `403 ORIGIN_FORBIDDEN`.
+- Limites configurables de connexions et de tableaux actifs, cache de documents borné, refus temporaire de surcharge et regroupement des notifications de présence.
+- Benchmark reproductible sur une installation locale temporaire, avec mesures des confirmations, latences, mémoire et convergence.
+- Script de mise à jour hors ligne actualisé pour appliquer la V2.1.1 sur une V2 ou une V2.1.0, en préservant les données et la configuration privée. Une ancienne valeur `PUBLIC_URL=http://localhost:3000` doit être corrigée pour l'accès distant.
+
 ## 2.1.0
 
 - Déploiement serveur Docker avec Node.js 24, utilisateur non privilégié, image applicative en lecture seule et volume de données persistant.
