@@ -10,6 +10,7 @@ data/
 .env.*
 !.env.example
 !.env.production.example
+!.env.vpn.example
 test-results/
 releases/*.sha256
 .openai/

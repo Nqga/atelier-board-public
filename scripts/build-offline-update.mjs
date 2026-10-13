@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const installerPath = 'releases/atelier-board-v2-to-v2.1.sh';
+const installerPath = 'releases/atelier-board-v2-to-v2.2.sh';
 const manifestName = '__atelier_update_manifest.tsv';
 const templatePath = fileURLToPath(new URL('./offline-update.template.sh', import.meta.url));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -20,7 +20,7 @@ function safeSource(path) {
   if (parts.some(part => ['.git', 'node_modules', 'data', 'test-results', '.openai', '.npmrc', '.netrc',
     'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519'].includes(part)) ||
       /(?:^|\/)(?:\.env(?:\..*)?|[^/]*\.(?:sqlite(?:-(?:shm|wal))?|db|pem|key|p12|pfx))$/i.test(path) &&
-      !['.env.example', '.env.production.example'].includes(path)) {
+      !['.env.example', '.env.production.example', '.env.vpn.example'].includes(path)) {
     throw new Error(`Fichier privé interdit dans la mise à jour : ${path}`);
   }
 }
@@ -43,8 +43,8 @@ export async function buildOfflineUpdate(root, output) {
   root = resolve(root);
   output = resolve(root, output ?? installerPath);
   const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
-  if (pkg.name !== 'atelier-board' || !/^2\.1\.\d+$/.test(pkg.version)) {
-    throw new Error('Le générateur attend Atelier Board en version 2.1.x.');
+  if (pkg.name !== 'atelier-board' || !/^2\.2\.\d+$/.test(pkg.version)) {
+    throw new Error('Le générateur attend Atelier Board en version 2.2.x.');
   }
   // New release sources must be staged first. Arbitrary untracked local files are never published.
   const files = [...new Set(execFileSync('git', ['ls-files', '-z', '--cached'],
@@ -57,7 +57,10 @@ export async function buildOfflineUpdate(root, output) {
   }
   await safeOutput(output);
   await safeOutput(`${output}.sha256`);
-  const selected = files.filter(path => path !== installerPath && path !== `${installerPath}.sha256` &&
+  // Generated distribution artifacts are not managed sources. Including an older
+  // embedded installer would recursively bundle its previous release payload.
+  const generatedInstaller = /^releases\/atelier-board-v2-to-v\d+(?:\.\d+)*\.sh(?:\.sha256)?$/;
+  const selected = files.filter(path => !generatedInstaller.test(path) &&
     path !== outputRelative && path !== `${outputRelative}.sha256`);
   if (!selected.includes('package.json') || !selected.includes('server.mjs')) {
     throw new Error('Les sources Atelier Board sont incomplètes.');

@@ -1,6 +1,6 @@
 {
   "name": "atelier-board",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "private": true,
   "type": "module",
   "description": "Tableau visuel web avec projets privés, invitations et collaboration en temps réel.",

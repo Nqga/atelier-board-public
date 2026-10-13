@@ -5,7 +5,7 @@ umask 077
 
 target_version='@@TARGET_VERSION@@'
 archive_sha256='@@ARCHIVE_SHA256@@'
-installer_path='releases/atelier-board-v2-to-v2.1.sh'
+installer_path='releases/atelier-board-v2-to-v2.2.sh'
 manifest_name='__atelier_update_manifest.tsv'
 workspace=''
 backup=''
@@ -18,13 +18,14 @@ changes=()
 
 usage() {
   cat <<'HELP'
-Usage : bash atelier-board-v2-to-v2.1.sh [--check] /chemin/atelier-board
+Usage : bash atelier-board-v2-to-v2.2.sh [--check] /chemin/atelier-board
 
-Applique toutes les sources de la v2.1 sans réseau, Git, Node ou Docker.
+Applique les sources de la v2.2 sans réseau, Git, Node ou Docker.
 --check valide le script et la destination sans modifier le projet.
 Arrêtez l'application avant d'appliquer. Aucun service n'est lancé ou arrêté.
 Les fichiers sources existants sont sauvegardés dans un dossier privé voisin.
-Les données, .env, node_modules et .git restent inchangés.
+Les données, les configurations privées .env*, node_modules et .git restent inchangés.
+Les anciens scripts de distribution déjà présents restent inchangés.
 HELP
 }
 
@@ -50,7 +51,7 @@ safe_path() {
   for part in "${path_parts[@]}"; do
     case "$part" in .git|node_modules|data|test-results|.openai|.npmrc|.netrc|id_rsa|id_dsa|id_ecdsa|id_ed25519) return 1 ;; esac
   done
-  case "$path" in .env.example|.env.production.example) return 0 ;; esac
+  case "$path" in .env.example|.env.production.example|.env.vpn.example) return 0 ;; esac
   case "$path" in .env|.env.*|*/.env|*/.env.*|*.sqlite|*.sqlite-shm|*.sqlite-wal|*.db|*.pem|*.key|*.p12|*.pfx) return 1 ;; esac
 }
 
@@ -188,8 +189,8 @@ validate_destination() {
   local project version
   project=$(sed -n 's/^[[:space:]]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$target/package.json" | sed -n '1p')
   version=$(sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$target/package.json" | sed -n '1p')
-  # v2.1.0 is the released container baseline; never replace a newer release.
-  [[ "$project" == 'atelier-board' && ( "$version" =~ ^2\.0\.[0-9]+$ || "$version" == '2.1.0' || "$version" == "$target_version" ) ]] || fail "La destination doit être Atelier Board v2.0.x, v2.1.0 ou v$target_version."
+  # Older v2.0/v2.1 patches are compatible; never replace a newer v2.2 release.
+  [[ "$project" == 'atelier-board' && ( "$version" =~ ^2\.(0|1)\.[0-9]+$ || "$version" == "$target_version" ) ]] || fail "La destination doit être Atelier Board v2.0.x, v2.1.x ou v$target_version."
   while IFS=$'\t' read -r checksum mode path; do check_target_path "$path"; done < "$payload/$manifest_name"
 }
 
@@ -211,7 +212,7 @@ if (( ${#changes[@]} == 0 )); then
   exit 0
 fi
 
-backup=$(mktemp -d "$(dirname -- "$target")/.atelier-board-v2.1-backup-XXXXXX")
+backup=$(mktemp -d "$(dirname -- "$target")/.atelier-board-v2.2-backup-XXXXXX")
 mkdir -- "$backup/files"
 printf '%s\n' "$target" > "$backup/target.path"
 : > "$backup/changes.tsv"

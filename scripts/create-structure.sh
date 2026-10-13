@@ -45,6 +45,7 @@ done <<'FILES'
 .dockerignore
 .env.example
 .env.production.example
+.env.vpn.example
 .gitignore
 CHANGELOG.md
 COLLABORATION.md
@@ -70,13 +71,15 @@ docker-compose.yml
 deploy/Caddyfile
 deploy/DEPLOYMENT.md
 deploy/compose.https.yml
+deploy/compose.vpn.yml
 package-lock.json
 package.json
-releases/atelier-board-v2-to-v2.1.sh
+releases/atelier-board-v2-to-v2.2.sh
 scripts/build-offline-update.mjs
 scripts/build-vendor.mjs
 scripts/check.mjs
 scripts/create-structure.sh
+scripts/configure-vpn.sh
 scripts/load-test.mjs
 scripts/offline-update.template.sh
 server.mjs
@@ -89,6 +92,7 @@ tests/quotas.test.mjs
 tests/offline-update.test.mjs
 tests/capacity.test.mjs
 tests/collaboration-client.test.mjs
+tests/configure-vpn.test.mjs
 tests/server.test.mjs
 tests/shared-store.test.mjs
 tests/store.test.mjs

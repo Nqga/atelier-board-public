@@ -1,8 +1,70 @@
-# Déployer Atelier Board V2.1.1
+# Déployer Atelier Board V2.2.0
 
-La V2.1.1 s'exécute sur une machine distante avec Docker Engine et Docker Compose. Le déploiement de base expose l'application sur **`http://ADRESSE_DU_SERVEUR:3000`**. La configuration HTTPS facultative demande **Compose 2.24.4 ou plus récent** pour retirer le port public de l'application avec `!reset`. Utiliser les commandes ci-dessous depuis la racine du projet.
+La V2.2.0 s'exécute sur une machine distante avec Docker Engine et Docker Compose. Le déploiement de base expose l'application sur **`http://ADRESSE_DU_SERVEUR:3000`**. Les configurations VPN et HTTPS demandent **Compose 2.24.4 ou plus récent** pour remplacer ou retirer la publication du port de l'application. Utiliser les commandes ci-dessous depuis la racine du projet.
 
 Les étapes de construction peuvent télécharger `node:24-alpine`, les paquets npm et, en HTTPS, `caddy:2-alpine`. Le script de mise à jour hors ligne transporte les modifications du code ; il ne transporte ni ces images ni une installation de dépendances.
+
+## Serveur privé accessible par VPN
+
+La machine et ses participants doivent déjà disposer d'un tunnel fonctionnel et des routes et droits d'accès nécessaires. Cette recette fonctionne avec un VPN de type WireTunnel/WireGuard qui transporte directement les connexions IP. Elle ne crée pas le tunnel, ne distribue pas de clés et ne modifie pas ses routes ou ses règles de pare-feu. Le tunnel n'est pas un proxy HTTP : le serveur garde `TRUST_PROXY=0`.
+
+### Choisir l'adresse du serveur
+
+Sur le serveur Linux, identifier une IPv4 qui lui est **réellement attribuée** et que les participants peuvent joindre depuis leur tunnel :
+
+```bash
+ip -4 address show
+```
+
+L'IP peut être celle de l'interface VPN du serveur ou une IP d'une interface réseau locale accessible par routage à travers le VPN. Elle doit être présente sur **cette machine**. Ne pas utiliser l'adresse d'une passerelle VPN distante, ni une adresse publique traduite par NAT qui n'est pas attribuée à une interface locale. Dans ce cas, utiliser l'IP locale atteinte par le routage déjà configuré et vérifier les routes/ACL du VPN existant.
+
+Dans les commandes suivantes, **`192.0.2.10` est un exemple documentaire à remplacer** par cette IPv4 locale. Le helper refuse une IP qui n'est pas assignée au serveur et n'ajoute aucune adresse à ses interfaces. Il demande Linux, Bash et `ip` du paquet `iproute2`, ainsi que les outils shell courants. Docker Engine et Compose 2.24.4 ou plus récent sont nécessaires au démarrage.
+
+### Configurer et démarrer
+
+Depuis la racine du projet, après sauvegarde si l'application contient déjà des données :
+
+```bash
+bash scripts/configure-vpn.sh --check 192.0.2.10 3000
+bash scripts/configure-vpn.sh 192.0.2.10 3000
+```
+
+`--check` vérifie l'adresse locale et la destination sans rien écrire. L'application de la configuration produit `.env.vpn` avec les permissions `600` :
+
+```dotenv
+VPN_BIND_ADDRESS=192.0.2.10
+PORT=3000
+VPN_PUBLIC_URL=http://192.0.2.10:3000
+```
+
+Le port est facultatif dans la commande du helper et vaut `3000` par défaut. Une configuration `.env.vpn` précédente est sauvegardée dans un fichier privé avant remplacement ; ses autres réglages sont conservés. Une nouvelle exécution avec les mêmes valeurs et permissions ne crée pas une nouvelle sauvegarde. `.env` reste inchangé : conserver les quotas, limites et éventuel `COMPOSE_PROJECT_NAME` existants. Ne pas remplacer un `.env` privé par l'exemple et ne pas créer un `.env` vide.
+
+Construire la commande avec `.env` **seulement s'il existe**, puis `.env.vpn` qui fournit les valeurs du profil VPN :
+
+```bash
+atelier_compose=(docker compose)
+if test -f .env; then
+  atelier_compose+=(--env-file .env)
+fi
+atelier_compose+=(--env-file .env.vpn -f docker-compose.yml -f deploy/compose.vpn.yml)
+
+# Si l'installation précédente utilisait « -p ancien-nom », ajouter cette
+# même option à atelier_compose avant d'exécuter les commandes.
+"${atelier_compose[@]}" config --quiet
+"${atelier_compose[@]}" up -d --build
+"${atelier_compose[@]}" ps
+curl http://192.0.2.10:3000/api/health
+```
+
+Conserver **le nom de projet Compose et le volume de données existants**. Si l'ancien déploiement utilisait `-p ancien-nom`, ajouter `atelier_compose+=(-p ancien-nom)` après la construction du tableau de commande. Si le nom vient de `.env`, le premier `--env-file` le conserve. Reprendre exactement les mêmes options pour `logs`, `stop`, `start`, les sauvegardes et les mises à jour suivantes. Les tableaux de commandes ci-dessus demandent Bash.
+
+Le profil utilise `!override` pour remplacer toute la liste des ports de `atelier` : il reste **un seul port lié à l'IPv4 choisie**, sans seconde publication sur `0.0.0.0`. Il fixe l'origine HTTP à `VPN_PUBLIC_URL` et `TRUST_PROXY=0`. Le conteneur écoute toujours sur `3000` en interne ; le nom du service et le volume `atelier-data` ne changent pas. Le helper n'arrête ni ne démarre les conteneurs : `up -d --build` est une action explicite après la configuration.
+
+Chaque participant ouvre **`http://IP_LOCALE_DU_SERVEUR:3000`**, ou le port choisi, après connexion à son tunnel. Tous doivent utiliser cette même origine, également présente dans les liens d'invitation. Le VPN chiffre son segment de trajet ; HTTP reste HTTP au niveau de l'application. Si le VPN se termine sur une passerelle, la protection du segment jusqu'au serveur dépend aussi du réseau qui les relie. Une publication sur une IP ne limite pas à elle seule les clients autorisés : conserver les règles VPN et pare-feu qui autorisent TCP sur ce port uniquement depuis les réseaux souhaités. Aucune redirection Internet n'est requise pour les participants du tunnel.
+
+Depuis un second appareil connecté au VPN, contrôler `/api/health` puis suivre le [parcours à plusieurs](#vérifier-le-parcours-à-plusieurs). Pour constater la publication Docker choisie, utiliser les mêmes options Compose avec `port atelier 3000`. Ne pas utiliser seulement `docker compose up` après avoir adopté le profil VPN : cela réactiverait la recette de base sur toutes les interfaces.
+
+Les profils VPN et HTTPS sont des alternatives : ne pas empiler leurs fichiers Compose. Pour un proxy HTTP/HTTPS déjà installé, suivre la [recette correspondante](#accès-local-seulement-ou-proxy-existant) ; une IP privée du VPN ne donne pas automatiquement un certificat public Caddy.
 
 ## Installation HTTP sur une machine distante
 
@@ -34,7 +96,7 @@ docker compose ps
 curl http://localhost:3000/api/health
 ```
 
-5. Depuis **un autre appareil**, ouvrir `http://ADRESSE_DU_SERVEUR:3000`. L'adresse `/api/health` doit également répondre avec `status: "ok"` et `version: "2.1.1"`. `localhost` sur cet autre appareil ne désigne pas le serveur.
+5. Depuis **un autre appareil**, ouvrir `http://ADRESSE_DU_SERVEUR:3000`. L'adresse `/api/health` doit également répondre avec `status: "ok"` et `version: "2.2.0"`. `localhost` sur cet autre appareil ne désigne pas le serveur.
 
 Tout visiteur qui peut joindre cette adresse peut ouvrir l'application et choisir une identité invitée. Les projets partagés restent privés et demandent une invitation ou des droits existants. Le volume `atelier-data` conserve les projets, les utilisateurs invités, leurs sessions et les images après recréation du conteneur.
 
@@ -110,7 +172,7 @@ Après correction de `.env`, recréer le service et rouvrir **la même adresse p
 
 ## Charge et limites de l'installation
 
-La V2.1.1 utilise **une instance serveur** avec SQLite et un volume persistant. Ne pas lancer `docker compose up --scale atelier=…` ni plusieurs processus partageant `DATA_DIR` : leurs états Yjs et leurs connexions ne seraient pas coordonnés. Pour augmenter la capacité, mesurer une instance et ajuster ses ressources et limites ; plusieurs instances demanderont une autre architecture de coordination et de stockage.
+La V2.2.0 utilise **une instance serveur** avec SQLite et un volume persistant. Ne pas lancer `docker compose up --scale atelier=…` ni plusieurs processus partageant `DATA_DIR` : leurs états Yjs et leurs connexions ne seraient pas coordonnés. Pour augmenter la capacité, mesurer une instance et ajuster ses ressources et limites ; plusieurs instances demanderont une autre architecture de coordination et de stockage.
 
 Dans `.env` ou `.env.production`, les limites d'admission sont des entiers strictement positifs :
 
@@ -125,7 +187,7 @@ Dans `.env` ou `.env.production`, les limites d'admission sont des entiers stric
 | `WEBSOCKET_CONNECTIONS_PER_MINUTE` | `300` | Tentatives de connexion WebSocket par IP et par minute. |
 | `INVITATION_JOINS_PER_MINUTE` | `300` | Admissions par invitation par IP et par minute. |
 
-Une valeur invalide empêche le démarrage. Un groupe derrière le même routeur partage les limites par IP ; chaque onglet consomme une connexion. Les limites de stockage et de taille des documents continuent de s'appliquer. Les projets inactifs sortent du cache si nécessaire et restent stockés. Une connexion trop lente peut être fermée et reprendre ultérieurement, avec ses changements locaux conservés.
+Une valeur invalide empêche le démarrage. Un groupe derrière le même routeur ou une passerelle VPN qui traduit les adresses partage les limites par IP ; chaque onglet consomme une connexion. Les limites de stockage et de taille des documents continuent de s'appliquer. Les projets inactifs sortent du cache si nécessaire et restent stockés. Une connexion trop lente peut être fermée et reprendre ultérieurement, avec ses changements locaux conservés.
 
 Pour exécuter un benchmark depuis les sources sur la machine à mesurer, utiliser Node.js 24 et installer les dépendances avec `npm ci`, puis :
 
@@ -138,7 +200,7 @@ Le script ouvre un serveur éphémère avec des données temporaires et plusieur
 
 ### Mesures de cette livraison
 
-Chaque scénario ci-dessous a été exécuté une fois avec **Node.js 24.19, 4 vCPU et 16 Gio de mémoire**, en boucle locale. Le serveur utilise un processus séparé, mais le générateur partage sa machine. Les tableaux contiennent de petits objets ; l'envoi dure dix secondes, puis le script attend les confirmations restantes. Le débit inclut cette attente finale : les nombres de confirmations ne correspondent donc pas nécessairement à dix fois le débit indiqué.
+Ces mesures ont été réalisées pour la V2.1.1 ; elles ne constituent pas de nouveaux essais de charge via le VPN. Chaque scénario ci-dessous a été exécuté une fois avec **Node.js 24.19, 4 vCPU et 16 Gio de mémoire**, en boucle locale. Le serveur utilise un processus séparé, mais le générateur partage sa machine. Les tableaux contiennent de petits objets ; l'envoi dure dix secondes, puis le script attend les confirmations restantes. Le débit inclut cette attente finale : les nombres de confirmations ne correspondent donc pas nécessairement à dix fois le débit indiqué.
 
 | Participants / projets | Confirmations reçues | Confirmations/s | Latence p95 |
 | --- | ---: | ---: | ---: |
@@ -189,13 +251,13 @@ chmod 600 "$atelier_backup"
 docker compose start atelier
 ```
 
-Avec la recette HTTPS, remplacer les commandes `docker compose` ci-dessus par `docker compose --env-file .env.production -f docker-compose.yml -f deploy/compose.https.yml`, en gardant le même nom de projet. Caddy peut rester actif pendant l'arrêt temporaire de Node.
+Avec le profil VPN, reprendre le tableau `atelier_compose` de sa recette à la place des commandes `docker compose` ci-dessus, notamment pour `ps`, `stop` et `start`, avec le même nom de projet. Avec la recette HTTPS, remplacer les commandes `docker compose` ci-dessus par `docker compose --env-file .env.production -f docker-compose.yml -f deploy/compose.https.yml`, en gardant le même nom de projet. Caddy peut rester actif pendant l'arrêt temporaire de Node.
 
-Conserver aussi les sources de la version utilisée et le fichier `.env` ou `.env.production`, dans un emplacement privé. Une copie des volumes Caddy permet de conserver les certificats lors d'un déplacement du serveur. La sauvegarde contient des données privées ; ne pas la publier dans GitHub. Vérifier qu'elle est lisible et tester périodiquement une restauration sur une installation séparée.
+Conserver aussi les sources de la version utilisée et les fichiers privés `.env`, `.env.vpn` ou `.env.production` utilisés, dans un emplacement privé. Une copie des volumes Caddy permet de conserver les certificats lors d'un déplacement du serveur. La sauvegarde contient des données privées ; ne pas la publier dans GitHub. Vérifier qu'elle est lisible et tester périodiquement une restauration sur une installation séparée.
 
-## Passer de la V2 ou V2.1.0 à la V2.1.1 hors ligne
+## Passer de la V2 ou V2.1 à la V2.2.0 hors ligne
 
-Télécharger [atelier-board-v2-to-v2.1.sh](../releases/atelier-board-v2-to-v2.1.sh) sur une machine connectée, puis transférer ce **seul fichier** vers le serveur V2. Le projet de destination doit être `atelier-board` en version `2.0.x`, `2.1.0` ou `2.1.1` dans `package.json` ; aucun dépôt Git n'est requis.
+Télécharger [atelier-board-v2-to-v2.2.sh](../releases/atelier-board-v2-to-v2.2.sh) sur une machine connectée, puis transférer ce **seul fichier** vers le serveur V2. Le projet de destination doit être `atelier-board` en version `2.0.x`, `2.1.x` ou `2.2.0` dans `package.json` ; aucun dépôt Git n'est requis.
 
 Le script nécessite Bash et les outils courants `tar`, `gzip`, `base64`, `mktemp`, `awk`, `sed`, `sort`, `cmp`, `cp`, `mv`, `chmod`, `cat`, ainsi que `sha256sum` ou `shasum`. Il ne demande ni Git, ni Node.js, ni npm, ni Docker pour remplacer les sources.
 
@@ -209,16 +271,16 @@ tar -czf /chemin/prive/atelier-data-v2.tar.gz -C /chemin/du/DATA_DIR .
 2. Vérifier la destination et appliquer le code :
 
 ```bash
-bash /chemin/atelier-board-v2-to-v2.1.sh --check /chemin/atelier-board
-bash /chemin/atelier-board-v2-to-v2.1.sh /chemin/atelier-board
+bash /chemin/atelier-board-v2-to-v2.2.sh --check /chemin/atelier-board
+bash /chemin/atelier-board-v2-to-v2.2.sh /chemin/atelier-board
 ```
 
-Le script vérifie le contenu embarqué avant remplacement et refuse les liens symboliques sur les chemins qu'il modifie. Il sauvegarde les sources remplacées dans un dossier privé voisin `.atelier-board-v2.1-backup-XXXXXX`, dont il affiche le chemin. Les nouveaux fichiers sont appliqués avec les autres sources ; `.git/`, `node_modules/`, `data/`, les bases SQLite et les fichiers `.env` privés restent conservés. Des modifications personnelles de fichiers sources remplacés restent dans cette sauvegarde : les revoir avant de les réappliquer.
+Le script vérifie le contenu embarqué avant remplacement et refuse les liens symboliques sur les chemins qu'il modifie. Il sauvegarde les sources remplacées dans un dossier privé voisin `.atelier-board-v2.2-backup-XXXXXX`, dont il affiche le chemin. Les nouveaux fichiers sont appliqués avec les autres sources ; `.git/`, `node_modules/`, `data/`, les bases SQLite et les fichiers `.env` privés, dont `.env.vpn`, restent conservés. Des modifications personnelles de fichiers sources remplacés restent dans cette sauvegarde : les revoir avant de les réappliquer.
 
 Le script ne démarre aucun processus et ne modifie pas la base. Si le remplacement des fichiers échoue, il tente de restaurer les sources déjà remplacées. Le dossier de sauvegarde contient `files/`, `changes.tsv`, `new-files.list`, `created-directories.list`, `target.path` et un `README.txt` de restauration. Une sauvegarde de sources ne remplace pas la sauvegarde des données. Conserver le chemin affiché jusqu'à la validation de la nouvelle installation.
 
-3. Vérifier les configurations locales. L'ancien `.env` n'est pas remplacé. Pour HTTP distant, utiliser `PUBLIC_URL=` et `TRUST_PROXY=0`, ainsi que `BIND_ADDRESS=0.0.0.0` ; une valeur `PUBLIC_URL=http://localhost:3000` héritée de la V2 doit être corrigée. Pour adopter Caddy, créer `.env.production` depuis son exemple et garder le nom de projet Compose de l'ancienne installation.
-4. Reconstruire puis démarrer. Pour HTTP :
+3. Choisir explicitement le mode d'exécution : le script ne modifie ni `.env` ni `.env.vpn` et ne configure pas automatiquement le réseau. Pour le serveur privé par VPN, exécuter `scripts/configure-vpn.sh --check IP_LOCALE_DU_SERVEUR 3000`, puis la même commande sans `--check`, et reprendre les commandes à deux fichiers Compose de la [recette VPN](#serveur-privé-accessible-par-vpn). Pour HTTP direct sans ce profil, utiliser `PUBLIC_URL=` et `TRUST_PROXY=0`, ainsi que `BIND_ADDRESS=0.0.0.0` ; une valeur `PUBLIC_URL=http://localhost:3000` héritée de la V2 doit être corrigée. Pour adopter Caddy, créer `.env.production` depuis son exemple. Garder le nom de projet Compose de l'ancienne installation dans tous les modes.
+4. Reconstruire puis démarrer avec le profil choisi. Pour le profil VPN, utiliser les commandes de sa recette. Pour HTTP direct sans profil :
 
 ```bash
 docker compose up -d --build
@@ -233,7 +295,7 @@ Pour HTTPS, utiliser les deux fichiers Compose et `.env.production` comme dans l
 Cette procédure cible un **volume Docker vide**. Garder l'ancien `DATA_DIR` ou l'ancien volume intact jusqu'à validation. Pour une restauration d'urgence, préparer une installation séparée ou un nouveau volume ; ne pas superposer une archive à une base déjà utilisée.
 
 1. Arrêter le serveur d'origine et créer l'archive de tout son répertoire de données, comme ci-dessus.
-2. Dans les sources V2.1.1, construire puis **créer sans démarrer** le service :
+2. Dans les sources V2.2.0, construire puis **créer sans démarrer** le service :
 
 ```bash
 docker compose build atelier
@@ -256,9 +318,9 @@ docker run --rm --network none --user 0:0 --entrypoint sh \
     tar -xzf /backup/data.tar.gz -C /data && chown -R 1000:1000 /data'
 ```
 
-4. Démarrer avec les mêmes fichiers Compose et le même nom de projet. Vérifier la santé, ouvrir un projet existant, contrôler une image, puis connecter deux navigateurs pour valider la synchronisation. Pour HTTPS, reprendre les options de la recette Caddy sur les commandes Compose des étapes 2 et 4.
+4. Démarrer avec les mêmes fichiers Compose et le même nom de projet. Vérifier la santé, ouvrir un projet existant, contrôler une image, puis connecter deux navigateurs pour valider la synchronisation. Pour le profil VPN, reprendre les options et le tableau `atelier_compose` de sa recette sur les commandes Compose des étapes 2 et 4 ; pour HTTPS, reprendre celles de la recette Caddy.
 
-Le helper de copie utilise temporairement UID 0 pour restaurer les permissions ; le serveur tourne ensuite avec UID 1000. Si `PUBLIC_URL` est fixé, il doit correspondre à l'origine utilisée par les participants ; avec Caddy, renseigner `DOMAIN`. Le serveur V2.1.1 applique les migrations nécessaires au premier démarrage.
+Le helper de copie utilise temporairement UID 0 pour restaurer les permissions ; le serveur tourne ensuite avec UID 1000. Si `PUBLIC_URL` est fixé, il doit correspondre à l'origine utilisée par les participants ; avec Caddy, renseigner `DOMAIN`. Le serveur V2.2.0 applique les migrations nécessaires au premier démarrage.
 
 ## Retour à une version antérieure
 
@@ -267,7 +329,7 @@ Un échec pendant l'application du script déclenche la restauration de ses fich
 Pour une destination restée inchangée depuis l'application du script :
 
 ```bash
-atelier_source_backup="/chemin/.atelier-board-v2.1-backup-XXXXXX"
+atelier_source_backup="/chemin/.atelier-board-v2.2-backup-XXXXXX"
 atelier_target="/chemin/atelier-board"
 cp -a "$atelier_source_backup/files/." "$atelier_target/"
 while IFS= read -r atelier_new_file; do
@@ -278,6 +340,6 @@ done < "$atelier_source_backup/new-files.list"
 
 Les anciens fichiers sont restaurés et les fichiers ajoutés par la mise à jour sont retirés ; les dossiers créés peuvent être laissés vides. Les données privées ne sont pas modifiées par cette restauration de sources.
 
-Après un démarrage réussi de la V2.1.1, revenir aux sources V2 **ne garantit pas** la compatibilité avec une base déjà migrée. Pour un retour complet, garder le service arrêté, reprendre la configuration précédente et restaurer dans un volume vide la sauvegarde de données faite avant mise à jour.
+Après un démarrage réussi de la V2.2.0, revenir aux sources V2 **ne garantit pas** la compatibilité avec une base déjà migrée. Pour un retour complet, garder le service arrêté, reprendre la configuration précédente et restaurer dans un volume vide la sauvegarde de données faite avant mise à jour.
 
 Ne pas exécuter deux versions à la fois sur le même volume. Les changements effectués après la sauvegarde ne figurent pas dans cette sauvegarde ; conserver l'état actuel séparément avant un retour arrière. Une restauration de données et un redémarrage doivent rester des actions explicites, jamais des conséquences automatiques de l'application du script de sources.

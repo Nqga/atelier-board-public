@@ -1,0 +1,12 @@
+# Depuis la racine du projet, avec docker-compose.yml (Compose >= 2.24.4).
+# Le tunnel VPN doit déjà être configuré sur la machine et chez les participants.
+services:
+  atelier:
+    # !override remplace le port de base, sans ajouter une seconde écoute publique.
+    ports: !override
+      - "${VPN_BIND_ADDRESS:?Exécutez scripts/configure-vpn.sh}:${PORT:-3000}:3000"
+    environment:
+      # L'écoute interne au conteneur reste accessible via le port publié ci-dessus.
+      HOST: 0.0.0.0
+      PUBLIC_URL: ${VPN_PUBLIC_URL:?Exécutez scripts/configure-vpn.sh}
+      TRUST_PROXY: "0"

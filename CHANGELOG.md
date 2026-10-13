@@ -1,5 +1,13 @@
 # Historique des versions
 
+## 2.2.0
+
+- Profil Docker Compose pour serveur privé accessible par un VPN déjà installé : publication sur une IPv4 locale choisie et un port configurable, sans conserver la publication sur toutes les interfaces.
+- Script Bash `scripts/configure-vpn.sh` avec vérification de l'IP assignée au serveur Linux, contrôle sans écriture, configuration privée `.env.vpn`, conservation des autres paramètres et sauvegarde d'une configuration VPN précédente.
+- Guide pour préserver le nom de projet Compose, le volume, les sessions et les liens d'invitation ; le tunnel reste configuré séparément et `TRUST_PROXY=0` en HTTP direct.
+- Script autonome `releases/atelier-board-v2-to-v2.2.sh` pour appliquer les sources V2.2 hors ligne sur V2 ou V2.1, avec sauvegarde des sources remplacées et conservation des données et configurations privées. Aucun démarrage ni changement automatique de configuration réseau.
+- Les configurations HTTP direct et HTTPS Caddy restent disponibles. Les images Docker et dépendances ne sont pas embarquées dans la mise à jour hors ligne.
+
 ## 2.1.1
 
 - Accès HTTP distant sur `0.0.0.0:3000` par défaut avec Docker Compose ; adresse d'écoute configurable et contrôle d'origine basé sur l'adresse utilisée lorsque `PUBLIC_URL` est vide.

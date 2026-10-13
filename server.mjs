@@ -36,7 +36,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     },
   });
   const address = await app.start();
-  console.log(`Atelier v2.1: ${address.url}`);
+  console.log(`Atelier v2.2: ${address.url}`);
   const stop = async () => { await app.close(); process.exit(0); };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);

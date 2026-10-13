@@ -1,6 +1,6 @@
-# Atelier Board — V2.1.1 collaborative et conteneurisée
+# Atelier Board — V2.2.0 collaborative et conteneurisée
 
-Un tableau visuel web en français pour organiser des idées, les relier et voter. Les projets privés se partagent par invitation, sans compte à créer, avec synchronisation en temps réel entre navigateurs et appareils. La V2.1.1 permet l'accès direct à un serveur distant sur `http://ADRESSE_DU_SERVEUR:3000`, conserve la recette HTTPS Caddy et fournit un script autonome de mise à jour du code V2 hors ligne.
+Un tableau visuel web en français pour organiser des idées, les relier et voter. Les projets privés se partagent par invitation, sans compte à créer, avec synchronisation en temps réel entre navigateurs et appareils. La V2.2.0 ajoute une configuration Docker pour un serveur privé accessible par un VPN déjà installé, sur `http://ADRESSE_DU_SERVEUR:3000`. Elle conserve l'accès HTTP direct, la recette HTTPS Caddy et le script autonome de mise à jour du code hors ligne depuis une V2 ou une V2.1.
 
 ## Démarrer
 
@@ -59,9 +59,32 @@ Le canevas n'a pas de pages imposées. Le zoom est borné entre 2,5 % et 1 200 %
 
 La vue, la sélection, le mode présentation et le minuteur sont propres à chaque participant. Le minuteur n'est pas synchronisé entre les navigateurs.
 
-## Héberger la V2.1.1 avec Docker
+## Héberger la V2.2.0 avec Docker
 
-Prérequis : un serveur avec **Docker Engine** et **Docker Compose** ; la recette HTTPS demande Compose **2.24.4 ou plus récent**. Node.js et npm restent dans l'image : ils ne sont pas nécessaires sur l'hôte. La construction peut télécharger l'image Node et les dépendances npm.
+Prérequis : un serveur avec **Docker Engine** et **Docker Compose** ; les recettes VPN et HTTPS demandent Compose **2.24.4 ou plus récent**. Node.js et npm restent dans l'image : ils ne sont pas nécessaires sur l'hôte. La construction peut télécharger l'image Node et les dépendances npm.
+
+### Serveur privé accessible par VPN
+
+Chaque participant doit être connecté au VPN et disposer d'une route vers le serveur. WireTunnel ou WireGuard doit déjà être configuré : la V2.2 ne crée pas le tunnel et ne modifie ni ses clés, ni ses routes, ni son pare-feu.
+
+Depuis le serveur Linux, choisir **une IPv4 réellement attribuée à l'une de ses interfaces**, que les participants peuvent joindre par le VPN. `192.0.2.10` ci-dessous est un exemple documentaire : le remplacer par cette IP locale, jamais par l'adresse d'une passerelle distante.
+
+```bash
+bash scripts/configure-vpn.sh --check 192.0.2.10 3000
+bash scripts/configure-vpn.sh 192.0.2.10 3000
+docker compose --env-file .env --env-file .env.vpn -f docker-compose.yml -f deploy/compose.vpn.yml up -d --build
+docker compose --env-file .env --env-file .env.vpn -f docker-compose.yml -f deploy/compose.vpn.yml ps
+```
+
+**Si `.env` n'existe pas, retirer `--env-file .env` des commandes Compose.** Ne pas créer un `.env` vide et ne pas remplacer une configuration existante. Le helper nécessite Bash et `ip` du paquet Linux `iproute2` ; `--check` ne crée aucun fichier. L'application génère un fichier privé `.env.vpn` avec les permissions `600`, conserve les autres paramètres et sauvegarde une précédente configuration VPN avant son remplacement.
+
+La recette VPN remplace la publication sur toutes les interfaces par un seul port lié à l'IP choisie ; le service et le volume existants sont conservés. Reprendre le même nom de projet Compose qu'avant la mise à jour, notamment tout `-p` utilisé auparavant. Le profil fixe `PUBLIC_URL` à l'adresse HTTP choisie, port compris. Le tunnel transporte les connexions HTTP et WebSocket : il ne constitue pas un proxy HTTP, donc `TRUST_PROXY=0`.
+
+Ouvrir `http://IP_LOCALE_DU_SERVEUR:3000` depuis deux appareils connectés au tunnel, puis suivre le [parcours de collaboration](#vérifier-un-accès-distant-et-une-invitation). Les invitations utilisent cette même adresse. Le chiffrement et les droits de passage dépendent du VPN : autoriser TCP `3000` uniquement pour les réseaux souhaités dans les règles existantes, sans redirection Internet. Lier un port à une IP ne remplace pas ces règles d'accès.
+
+Voir le [guide VPN](deploy/DEPLOYMENT.md#serveur-privé-accessible-par-vpn) pour les sauvegardes, les commandes réutilisables et le cas d'une IP accessible par routage VPN.
+
+### Accès HTTP direct
 
 Pour publier sur une machine distante avec son adresse et le port `3000` :
 
@@ -132,24 +155,24 @@ npm run load:test -- --participants 100 --duration 10 --boards 10 --json /tmp/at
 
 Il mesure les confirmations de sauvegarde, les latences, la mémoire et le retard de la boucle serveur, et vérifie la convergence des participants et de l'état stocké. La limite d'admission par défaut est de **50 connexions par projet**, avec **500 connexions au total**. Ses résultats caractérisent la machine et le scénario testés ; ils ne garantissent pas une capacité identique avec de grands tableaux, beaucoup d'images ou des clients lents. Voir les [limites de déploiement](deploy/DEPLOYMENT.md#charge-et-limites-de-linstallation) et les [mesures de cette livraison](deploy/DEPLOYMENT.md#mesures-de-cette-livraison) avant d'augmenter la capacité.
 
-## Appliquer la V2.1.1 hors ligne sur une V2
+## Appliquer la V2.2.0 hors ligne sur une V2 ou V2.1
 
-Télécharger une seule fois [releases/atelier-board-v2-to-v2.1.sh](releases/atelier-board-v2-to-v2.1.sh), puis transférer ce fichier vers la machine qui contient la V2. Il embarque les sources V2.1.1 : ni Git, ni Node, ni npm, ni accès réseau ne sont nécessaires pour appliquer les modifications.
+Télécharger une seule fois [releases/atelier-board-v2-to-v2.2.sh](releases/atelier-board-v2-to-v2.2.sh), puis transférer ce fichier vers la machine qui contient la V2. Il embarque les sources V2.2.0 : ni Git, ni Node, ni npm, ni accès réseau ne sont nécessaires pour appliquer les modifications.
 
 Arrêter l'application et sauvegarder ses données avant de l'utiliser :
 
 ```bash
-bash atelier-board-v2-to-v2.1.sh --check /chemin/atelier-board
-bash atelier-board-v2-to-v2.1.sh /chemin/atelier-board
+bash atelier-board-v2-to-v2.2.sh --check /chemin/atelier-board
+bash atelier-board-v2-to-v2.2.sh /chemin/atelier-board
 ```
 
-Le script accepte un projet `atelier-board` en version `2.0.x`, `2.1.0` ou `2.1.1`, vérifie l'archive et crée une sauvegarde privée des sources remplacées à côté du projet. Il conserve les fichiers `.env` privés, `data/`, `node_modules/` et `.git/`. Il ne démarre aucun serveur et ne lance ni migration de base, ni installation de dépendances. Pour l'accès HTTP distant, vérifier ensuite que l'ancien `.env` ne fixe plus `PUBLIC_URL` à `localhost` ou à une origine HTTPS qui n'est pas utilisée.
+Le script accepte un projet `atelier-board` en version `2.0.x`, `2.1.x` ou `2.2.0`, vérifie l'archive et crée une sauvegarde privée des sources remplacées à côté du projet. Il conserve les fichiers `.env` privés, dont `.env.vpn`, ainsi que `data/`, `node_modules/` et `.git/`. Il ne démarre aucun serveur et ne lance ni migration de base, ni installation de dépendances. Il ne modifie pas automatiquement la configuration d'exécution. Pour le serveur privé, lancer ensuite `scripts/configure-vpn.sh` avec l'IP locale du serveur et employer les deux fichiers Compose ; les autres modes restent disponibles.
 
 Si un fichier `SHA256SUMS` accompagne le script sur la page de version GitHub, le télécharger pour une vérification supplémentaire. Placer les deux fichiers dans le même dossier, puis lancer `sha256sum -c SHA256SUMS` depuis ce dossier. Le script reste autonome et contrôle également l'archive qu'il embarque.
 
 **Le mode hors ligne concerne la mise à jour du code.** Construire ou démarrer Docker peut ensuite demander Internet pour télécharger des images et des dépendances. Le script n'est pas une sauvegarde des projets, sessions et images : suivre la [procédure de déploiement et de sauvegarde](deploy/DEPLOYMENT.md).
 
-Pour régénérer le script depuis les sources V2.1.1, le mainteneur doit disposer de Git et Node.js. Le générateur utilise uniquement les fichiers de l'index Git, afin de laisser les fichiers locaux non suivis hors de l'archive. Indexer explicitement tout nouveau fichier source avant génération, par exemple avec `git add chemin/du/fichier`, puis :
+Pour régénérer le script depuis les sources V2.2.0, le mainteneur doit disposer de Git et Node.js. Le générateur utilise uniquement les fichiers de l'index Git, afin de laisser les fichiers locaux non suivis hors de l'archive. Indexer explicitement tout nouveau fichier source avant génération, par exemple avec `git add chemin/du/fichier`, puis :
 
 ```bash
 npm run build:offline-update

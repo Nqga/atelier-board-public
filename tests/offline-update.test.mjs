@@ -13,7 +13,7 @@ const gitAvailable = spawnSync('git', ['--version'], { stdio: 'ignore' }).status
 const bashAvailable = spawnSync('bash', ['--version'], { stdio: 'ignore' }).status === 0;
 const supported = gitAvailable && bashAvailable;
 const options = { skip: supported ? false : 'Tests du générateur : Git et Bash sont nécessaires.' };
-const targetVersion = '2.1.1';
+const targetVersion = '2.2.0';
 let scratch, source, installer;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 
@@ -31,13 +31,18 @@ before(async () => {
   await put(source, 'package.json', JSON.stringify({ name: 'atelier-board', version: targetVersion }, null, 2) + '\n');
   await put(source, 'server.mjs', `export const version = "${targetVersion}";\n`);
   await put(source, 'dist/app.js', 'export const newCode = true;\n');
-  await put(source, 'scripts/demo.sh', '#!/usr/bin/env bash\nprintf "v2.1\\n"\n');
+  await put(source, 'scripts/demo.sh', '#!/usr/bin/env bash\nprintf "v2.2\\n"\n');
   await put(source, 'deploy/Caddyfile', 'example.invalid {\n reverse_proxy app:3000\n}\n');
   await put(source, '.env.example', 'PORT=3000\n');
   await put(source, '.env.production.example', 'APP_DOMAIN=example.invalid\n');
+  await put(source, '.env.vpn.example', 'VPN_BIND_ADDRESS=192.0.2.10\nVPN_PORT=3000\n');
+  await put(source, 'docker-compose.vpn.yml', 'services:\n  app:\n    ports: ["${VPN_BIND_ADDRESS}:${VPN_PORT}:3000"]\n');
+  await put(source, 'scripts/configure-vpn.sh', '#!/usr/bin/env bash\nprintf "Configure only when explicitly invoked\\n"\n');
+  await put(source, 'releases/atelier-board-v2-to-v2.1.sh', '# old generated distribution artifact\n');
+  await put(source, 'releases/atelier-board-v2-to-v2.1.sh.sha256', 'old distribution checksum\n');
   execFileSync('git', ['init', '-q'], { cwd: source });
   execFileSync('git', ['add', '--all'], { cwd: source });
-  installer = join(scratch, 'atelier-board-v2-to-v2.1.sh');
+  installer = join(scratch, 'atelier-board-v2-to-v2.2.sh');
   await buildOfflineUpdate(source, installer);
 });
 
@@ -52,6 +57,8 @@ async function destination(name) {
   await put(root, 'dist/local-private.txt', 'local file outside the source manifest\n');
   await put(root, '.env', 'PRIVATE_SETTING=keep-this-local\n');
   await put(root, '.env.production', 'PRIVATE_SETTING=also-local\n');
+  await put(root, '.env.vpn', 'VPN_BIND_ADDRESS=10.0.0.90\nVPN_PORT=4000\n');
+  await put(root, 'releases/atelier-board-v2-to-v2.1.sh', '# retain the installed historical distribution artifact\n');
   await put(root, 'data/atelier.sqlite', Buffer.from([0, 1, 2, 255, 3]));
   await put(root, 'data/assets/image.png', Buffer.from([137, 80, 78, 71, 8, 9]));
   await put(root, '.git/local-marker', 'local Git state\n');
@@ -66,8 +73,8 @@ function run(target, args = [], env = {}, script = installer) {
 }
 
 async function privateSnapshot(target) {
-  const paths = ['.env', '.env.production', 'data/atelier.sqlite', 'data/assets/image.png',
-    '.git/local-marker', 'dist/local-private.txt'];
+  const paths = ['.env', '.env.production', '.env.vpn', 'data/atelier.sqlite', 'data/assets/image.png',
+    '.git/local-marker', 'dist/local-private.txt', 'releases/atelier-board-v2-to-v2.1.sh'];
   return Object.fromEntries(await Promise.all(paths.map(async path => [path, sha(await readFile(join(target, path)))])));
 }
 
@@ -97,45 +104,50 @@ test('offline update installs sources with normalized modes and preserves privat
   assert.equal((await lstat(join(target, 'node_modules'))).isSymbolicLink(), true);
   assert.equal((await stat(join(target, 'deploy/Caddyfile'))).mode & 0o777, 0o644);
   assert.equal((await stat(join(target, 'scripts/demo.sh'))).mode & 0o777, 0o755);
-  assert.equal((await stat(join(target, 'releases/atelier-board-v2-to-v2.1.sh'))).mode & 0o777, 0o755);
-  assert.deepEqual(await readFile(join(target, 'releases/atelier-board-v2-to-v2.1.sh')), await readFile(installer));
-  const backups = (await readdir(scratch)).filter(name => name.startsWith('.atelier-board-v2.1-backup-'));
+  assert.equal((await stat(join(target, 'scripts/configure-vpn.sh'))).mode & 0o777, 0o755);
+  assert.equal(await readFile(join(target, '.env.vpn.example'), 'utf8'), 'VPN_BIND_ADDRESS=192.0.2.10\nVPN_PORT=3000\n');
+  assert.match(await readFile(join(target, 'docker-compose.vpn.yml'), 'utf8'), /VPN_BIND_ADDRESS/);
+  await assert.rejects(stat(join(target, 'releases/atelier-board-v2-to-v2.1.sh.sha256')), { code: 'ENOENT' });
+  assert.equal((await stat(join(target, 'releases/atelier-board-v2-to-v2.2.sh'))).mode & 0o777, 0o755);
+  assert.deepEqual(await readFile(join(target, 'releases/atelier-board-v2-to-v2.2.sh')), await readFile(installer));
+  const backups = (await readdir(scratch)).filter(name => name.startsWith('.atelier-board-v2.2-backup-'));
   assert.equal(backups.length, 1);
   const backup = join(scratch, backups[0]);
   assert.equal((await stat(backup)).mode & 0o777, 0o700);
   assert.deepEqual(await readFile(join(backup, 'files/server.mjs')), oldServer);
   assert.equal((await stat(join(backup, 'files/server.mjs'))).mode & 0o777, 0o600);
-  assert.match(await readFile(join(backup, 'new-files.list'), 'utf8'), /releases\/atelier-board-v2-to-v2.1\.sh/);
+  assert.match(await readFile(join(backup, 'new-files.list'), 'utf8'), /releases\/atelier-board-v2-to-v2.2\.sh/);
   assert.equal(run(target).status, 0);
-  assert.equal(run(target, [], {}, join(target, 'releases/atelier-board-v2-to-v2.1.sh')).status, 0);
-  assert.equal((await readdir(scratch)).filter(name => name.startsWith('.atelier-board-v2.1-backup-')).length, 1);
+  assert.equal(run(target, [], {}, join(target, 'releases/atelier-board-v2-to-v2.2.sh')).status, 0);
+  assert.equal((await readdir(scratch)).filter(name => name.startsWith('.atelier-board-v2.2-backup-')).length, 1);
 });
 
 test('--check validates without changing the target or creating a backup', options, async () => {
   const target = await destination('check only');
   const before = await sourceSnapshot(target);
-  const backupsBefore = (await readdir(scratch)).filter(name => name.startsWith('.atelier-board-v2.1-backup-')).length;
+  const backupsBefore = (await readdir(scratch)).filter(name => name.startsWith('.atelier-board-v2.2-backup-')).length;
   const result = run(target, ['--check']);
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(await sourceSnapshot(target), before);
-  assert.equal((await readdir(scratch)).filter(name => name.startsWith('.atelier-board-v2.1-backup-')).length, backupsBefore);
+  assert.equal((await readdir(scratch)).filter(name => name.startsWith('.atelier-board-v2.2-backup-')).length, backupsBefore);
 });
 
 test('wrong project and incompatible versions are rejected before writing source files', options, async () => {
   for (const [index, name, version] of [[0, 'other-project', '2.0.0'], [1, 'atelier-board', '1.9.0'],
-    [2, 'atelier-board', '2.2.0'], [3, 'atelier-board', '2.1.2'], [4, 'atelier-board', '2.1.1-beta.1']]) {
+    [2, 'atelier-board', '2.2.1'], [3, 'atelier-board', '2.3.0'], [4, 'atelier-board', '2.1.1-beta.1'],
+    [5, 'atelier-board', '2.2.0-beta.1'], [6, 'atelier-board', '2.1.1; echo hacked']]) {
     const target = await destination(`invalid-version-${index}`);
     await put(target, 'package.json', JSON.stringify({ name, version }, null, 2));
     const before = await sourceSnapshot(target);
     const result = run(target);
     assert.notEqual(result.status, 0);
     assert.deepEqual(await sourceSnapshot(target), before);
-    assert.match(result.stderr, /v2\.0\.x, v2\.1\.0 ou v2\.1\.1/);
+    assert.match(result.stderr, /v2\.0\.x, v2\.1\.x ou v2\.2\.0/);
   }
 });
 
-test('v2.0 patches and v2.1.0 upgrade offline while preserving the configured server address', options, async () => {
-  for (const version of ['2.0.99', '2.1.0', targetVersion]) {
+test('v2.0 and v2.1 patches upgrade offline while preserving private server and VPN configuration', options, async () => {
+  for (const version of ['2.0.99', '2.1.0', '2.1.1', '2.1.99', targetVersion]) {
     const target = await destination(`supported-version-${version}`);
     await put(target, 'package.json', JSON.stringify({ name: 'atelier-board', version }, null, 2));
     await put(target, '.env', 'PUBLIC_URL=http://localhost:3000\nKEEP_LOCAL_CONFIG=yes\n');
@@ -145,6 +157,19 @@ test('v2.0 patches and v2.1.0 upgrade offline while preserving the configured se
     assert.equal(JSON.parse(await readFile(join(target, 'package.json'), 'utf8')).version, targetVersion);
     assert.deepEqual(await privateSnapshot(target), original);
   }
+});
+
+test('the offline source update does not create or apply a private VPN configuration', options, async () => {
+  const target = await destination('vpn-not-configured');
+  await rm(join(target, '.env.vpn'));
+  const config = await readFile(join(target, '.env'));
+  const result = run(target);
+  assert.equal(result.status, 0, result.stderr);
+  await assert.rejects(stat(join(target, '.env.vpn')), { code: 'ENOENT' });
+  assert.deepEqual(await readFile(join(target, '.env')), config);
+  assert.ok(await stat(join(target, '.env.vpn.example')));
+  assert.ok(await stat(join(target, 'scripts/configure-vpn.sh')));
+  assert.doesNotMatch(result.stdout, /Configure only when explicitly invoked/);
 });
 
 test('corrupted embedded archive is rejected without modifying the target', options, async () => {
@@ -223,7 +248,7 @@ test('an existing update lock is preserved and refuses concurrent updates', opti
 test('the builder excludes untracked private files and refuses staged secrets and symlinks', options, async () => {
   const privateRoot = join(scratch, 'private-build');
   await mkdir(privateRoot);
-  await put(privateRoot, 'package.json', JSON.stringify({ name: 'atelier-board', version: '2.1.0' }));
+  await put(privateRoot, 'package.json', JSON.stringify({ name: 'atelier-board', version: targetVersion }));
   await put(privateRoot, 'server.mjs', '// public\n');
   execFileSync('git', ['init', '-q'], { cwd: privateRoot });
   execFileSync('git', ['add', 'package.json', 'server.mjs'], { cwd: privateRoot });
@@ -235,6 +260,10 @@ test('the builder excludes untracked private files and refuses staged secrets an
   execFileSync('git', ['add', '.npmrc'], { cwd: privateRoot });
   await assert.rejects(buildOfflineUpdate(privateRoot, output), /Fichier privé interdit/);
   execFileSync('git', ['rm', '--cached', '.npmrc'], { cwd: privateRoot });
+  await put(privateRoot, '.env.vpn', 'VPN_BIND_ADDRESS=10.0.0.90\nLOCAL_SECRET=fake-test-sentinel\n');
+  execFileSync('git', ['add', '.env.vpn'], { cwd: privateRoot });
+  await assert.rejects(buildOfflineUpdate(privateRoot, output), /Fichier privé interdit/);
+  execFileSync('git', ['rm', '--cached', '.env.vpn'], { cwd: privateRoot });
   await symlink(join(privateRoot, 'server.mjs'), join(privateRoot, 'linked.mjs'));
   execFileSync('git', ['add', 'linked.mjs'], { cwd: privateRoot });
   await assert.rejects(buildOfflineUpdate(privateRoot, output), /Lien symbolique source interdit/);
@@ -272,8 +301,8 @@ test('a destination without Git, Node or Docker in PATH accepts the update', opt
   assert.equal(result.status, 0, result.stderr);
 });
 
-test('the updater applies to actual V2 and v2.1.0 archives without Git metadata', options, async t => {
-  for (const revision of ['eb140cf', '4aadce0', '1e9f778']) {
+test('the updater applies to actual V2, v2.1.0 and v2.1.1 archives without Git metadata', options, async t => {
+  for (const revision of ['eb140cf', '4aadce0', '1e9f778', 'dfcfb71']) {
     if (spawnSync('git', ['cat-file', '-e', `${revision}^{commit}`], { cwd: repository }).status !== 0) {
       t.diagnostic(`Archive ${revision} absente dans cette copie ; scénario historique non exécuté.`);
       continue;
@@ -284,12 +313,14 @@ test('the updater applies to actual V2 and v2.1.0 archives without Git metadata'
     await writeFile(archive, execFileSync('git', ['archive', revision], { cwd: repository, maxBuffer: 8 * 1024 * 1024 }));
     execFileSync('tar', ['-xf', archive, '-C', target]);
     await put(target, '.env', 'PUBLIC_URL=http://localhost:3000\nKEEP_LOCAL_CONFIG=yes\n');
+    await put(target, '.env.vpn', 'VPN_BIND_ADDRESS=10.0.0.90\nVPN_PORT=4000\n');
     await put(target, 'data/atelier.sqlite', Buffer.from('SQLite fixture bytes to retain exactly'));
     await put(target, 'data/assets/existing.png', Buffer.from([137, 80, 78, 71]));
     const result = run(target);
     assert.equal(result.status, 0, `${revision}: ${result.stderr}`);
     assert.equal(JSON.parse(await readFile(join(target, 'package.json'), 'utf8')).version, targetVersion);
     assert.equal(await readFile(join(target, '.env'), 'utf8'), 'PUBLIC_URL=http://localhost:3000\nKEEP_LOCAL_CONFIG=yes\n');
+    assert.equal(await readFile(join(target, '.env.vpn'), 'utf8'), 'VPN_BIND_ADDRESS=10.0.0.90\nVPN_PORT=4000\n');
     assert.equal(await readFile(join(target, 'data/atelier.sqlite'), 'utf8'), 'SQLite fixture bytes to retain exactly');
     assert.deepEqual(await readFile(join(target, 'data/assets/existing.png')), Buffer.from([137, 80, 78, 71]));
     await assert.rejects(stat(join(target, '.git')), { code: 'ENOENT' });
