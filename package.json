@@ -1,6 +1,6 @@
 {
   "name": "atelier-board",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "description": "Tableau visuel web avec projets privés, invitations et collaboration en temps réel.",
@@ -11,6 +11,7 @@
     "dev": "node server.mjs",
     "start": "node server.mjs",
     "build:vendor": "node scripts/build-vendor.mjs",
+    "build:offline-update": "node scripts/build-offline-update.mjs",
     "test": "node --test tests/*.test.mjs",
     "check": "node scripts/check.mjs"
   },

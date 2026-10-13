@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import WebSocket from 'ws';
+import packageMetadata from '../package.json' with { type: 'json' };
 import { createAtelierServer } from '../server.mjs';
 import { Y, encodeBase64, decodeBase64, boardFromDoc, objectToShared } from '../dist/shared-model.js';
 
@@ -182,6 +183,49 @@ function delta(doc, mutate) {
 const note = doc => doc.getMap('objects').get('note-one');
 const snapshot = (doc, id) => boardFromDoc(doc, id).objects.find(object => object.id === 'note-one');
 function documentFrom(state) { const doc = new Y.Doc(); Y.applyUpdate(doc, decodeBase64(state)); return doc; }
+
+test('Anonymous GET/HEAD health probes read SQLite without creating sessions or leaking project data', async t => {
+  const environment = await fixture(t);
+  const owner = await new Browser(environment).become('Alice');
+  await owner.createBoard();
+  const db = new DatabaseSync(join(environment.dataDir, 'atelier.sqlite'));
+  t.after(() => db.close());
+  const counts = () => ['users', 'sessions', 'boards', 'members'].map(table => db.prepare(`SELECT count(*) AS count FROM ${table}`).get().count);
+  const before = counts();
+  const anonymous = new Browser(environment);
+  const response = await anonymous.request('/api/health', { origin: null });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.data, { status: 'ok', version: packageMetadata.version });
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(response.headers.getSetCookie(), []);
+  const head = await anonymous.request('/api/health', { method: 'HEAD', origin: null });
+  assert.equal(head.status, 200);
+  assert.equal(head.text, '');
+  assert.deepEqual(head.headers.getSetCookie(), []);
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+    const rejected = await anonymous.request('/api/health', { method, origin: null });
+    assert.equal(rejected.status, 405);
+    assert.equal(rejected.headers.get('allow'), 'GET, HEAD');
+    assert.deepEqual(rejected.headers.getSetCookie(), []);
+  }
+  assert.deepEqual(counts(), before);
+  assert.equal((await owner.request('/api/session')).data.version, packageMetadata.version);
+});
+
+test('Health returns a generic unavailable response if its SQLite connection fails', async t => {
+  const environment = await fixture(t);
+  const prepare = DatabaseSync.prototype.prepare;
+  try {
+    DatabaseSync.prototype.prepare = function () { throw new Error('Internal database location must not leak'); };
+    const response = await new Browser(environment).request('/api/health', { origin: null });
+    assert.equal(response.status, 503);
+    assert.deepEqual(response.data, { status: 'unavailable' });
+    assert.deepEqual(response.headers.getSetCookie(), []);
+  } finally {
+    DatabaseSync.prototype.prepare = prepare;
+  }
+  assert.equal((await new Browser(environment).request('/api/health', { origin: null })).status, 200);
+});
 
 test('Guests have separate protected sessions and project directories, without accounts', async t => {
   const environment = await fixture(t);

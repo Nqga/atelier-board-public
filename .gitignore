@@ -9,5 +9,7 @@ data/
 .env
 .env.*
 !.env.example
+!.env.production.example
 test-results/
+releases/*.sha256
 .openai/

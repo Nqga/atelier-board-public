@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, open, rename, stat } from 'node:fs/promises';
 import { resolve, join, extname, sep } from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
+import packageMetadata from '../package.json' with { type: 'json' };
 import { Y, docFromBoard, boardFromDoc } from '../dist/shared-model.js';
 import { validateBoard } from '../dist/store.js';
 import { openDatabase, transaction, MAX_RETAINED_UPDATES } from './database.mjs';
@@ -89,7 +90,7 @@ export async function createAtelierServer(options = {}) {
     if (role === 'editor' && !isEditor(row.role)) fail(403, 'READ_ONLY', 'Ce projet est en lecture seule pour vous.');
     return row.role;
   }
-  function sessionPayload(session) { return { user: session?.user || null, collaboration: true, version: '2.0.0' }; }
+  function sessionPayload(session) { return { user: session?.user || null, collaboration: true, version: packageMetadata.version }; }
   function json(res, status, payload, extraHeaders = {}) {
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...extraHeaders });
     res.end(JSON.stringify(payload));
@@ -185,6 +186,17 @@ export async function createAtelierServer(options = {}) {
     const parts = pathname.split('/').filter(Boolean);
     const ip = requestIP(req);
     if (parts[0] !== 'api') return serveStatic(pathname, req, res);
+    // Probes must neither create a guest nor consume the ordinary API rate limit.
+    if (parts.length === 2 && parts[1] === 'health') {
+      if (!['GET', 'HEAD'].includes(req.method)) return json(res, 405, { error: 'METHOD_NOT_ALLOWED', code: 'METHOD_NOT_ALLOWED', message: 'Méthode non prise en charge.' }, { Allow: 'GET, HEAD' });
+      try {
+        if (closed) throw new Error('Server is closing');
+        db.prepare('SELECT 1 AS ready FROM sqlite_schema LIMIT 1').get();
+        return json(res, 200, { status: 'ok', version: packageMetadata.version });
+      } catch {
+        return json(res, 503, { status: 'unavailable' });
+      }
+    }
     if (!limiter.allow(`http:${ip}`, 600)) fail(429, 'RATE_LIMIT', 'Trop de requêtes. Réessayez dans un instant.');
     if (parts.length === 2 && parts[1] === 'session') {
       if (req.method === 'GET') return json(res, 200, sessionPayload(authenticate(req, false)));

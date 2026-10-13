@@ -9,3 +9,11 @@ data
 *.sqlite-wal
 tests
 test-results
+deploy
+scripts
+*.md
+*.sh
+*.zip
+*.bundle
+releases
+*.sha256

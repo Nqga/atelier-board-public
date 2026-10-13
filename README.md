@@ -1,6 +1,6 @@
-# Atelier Board — V2 collaborative
+# Atelier Board — V2.1 collaborative et conteneurisée
 
-Un tableau visuel web en français pour organiser des idées, les relier et voter. La V2 ajoute des projets privés partagés par invitation, sans compte à créer, avec synchronisation en temps réel entre navigateurs et appareils.
+Un tableau visuel web en français pour organiser des idées, les relier et voter. Les projets privés se partagent par invitation, sans compte à créer, avec synchronisation en temps réel entre navigateurs et appareils. La V2.1 ajoute un déploiement Docker pour serveur, une configuration HTTPS Caddy et un script autonome de mise à jour du code V2 hors ligne.
 
 ## Démarrer
 
@@ -34,7 +34,7 @@ Les tableaux de la V1 restent locaux jusqu'à leur partage explicite. Publier un
 
 Les projets partagés utilisent Yjs : les modifications indépendantes se combinent et les textes des objets fusionnent caractère par caractère. Deux modifications simultanées d'une même position, couleur ou autre propriété suivent la résolution déterministe de Yjs. Une suppression concurrente empêche une simple modification de recréer l'objet. Annuler vise les modifications du participant qui utilise la commande.
 
-Un tableau déjà ouvert reste éditable pendant une coupure réseau. Le navigateur conserve un brouillon de récupération dans IndexedDB et renvoie les changements à la reconnexion. L'interface distingue les changements en attente de ceux confirmés après stockage par le serveur. Une copie en cache n'est pas une confirmation de sauvegarde distante. L'ouverture initiale et le rechargement de l'application nécessitent le serveur ; cette V2 n'installe pas de service worker.
+Un tableau déjà ouvert reste éditable pendant une coupure réseau. Le navigateur conserve un brouillon de récupération dans IndexedDB et renvoie les changements à la reconnexion. L'interface distingue les changements en attente de ceux confirmés après stockage par le serveur. Une copie en cache n'est pas une confirmation de sauvegarde distante. L'ouverture initiale et le rechargement de l'application nécessitent le serveur ; cette version n'installe pas de service worker.
 
 Le brouillon est associé au projet et à l'identité du visiteur : sa récupération suppose le même cookie et un stockage navigateur disponible. Une erreur temporaire de sauvegarde ou une limite de fréquence entraîne une nouvelle tentative automatique avec un délai progressif.
 
@@ -57,43 +57,83 @@ Le canevas n'a pas de pages imposées. Le zoom est borné entre 2,5 % et 1 200 %
 
 La vue, la sélection, le mode présentation et le minuteur sont propres à chaque participant. Le minuteur n'est pas synchronisé entre les navigateurs.
 
-## Héberger la V2
+## Héberger la V2.1 avec Docker
 
-Il faut un hébergement capable d'exécuter **un processus Node.js 24**, d'accepter les connexions **WebSocket** et de conserver un **disque persistant**. L'interface et le serveur doivent être servis sur la même origine. En production, placer le serveur derrière un proxy HTTPS qui transmet les connexions WebSocket et les cookies.
+Prérequis : un serveur avec **Docker Engine** et **Docker Compose** ; la recette HTTPS demande Compose **2.24.4 ou plus récent**. Node.js et npm restent dans l'image : ils ne sont pas nécessaires sur l'hôte. La construction peut télécharger l'image Node et les dépendances npm.
 
-La V1 publiée sur ChatGPT Sites sert des fichiers statiques. L'architecture Node.js/SQLite de la V2 demande un serveur distinct ; publier seulement `dist/` n'active pas la collaboration. Le déploiement de cette V2 ne remplace donc pas automatiquement l'ancien site.
+Pour tester sur le serveur en accès local :
 
-Le fichier [.env.example](.env.example) décrit la configuration du serveur. Pour une installation Node classique, utiliser par exemple :
+```bash
+cp .env.example .env
+docker compose up -d --build
+docker compose ps
+curl http://localhost:3000/api/health
+```
+
+Le port HTTP est publié sur `127.0.0.1`. Pour une publication HTTPS, faire pointer son domaine vers le serveur, ouvrir les ports 80 et 443, puis, depuis la racine du projet :
+
+```bash
+cp .env.production.example .env.production
+# Modifier DOMAIN dans .env.production, par exemple board.example.com.
+docker compose --env-file .env.production -f docker-compose.yml -f deploy/compose.https.yml up -d --build
+```
+
+Caddy obtient le certificat HTTPS et transmet les connexions WebSocket à `atelier:3000`. Avec cette recette, seul Caddy publie des ports sur l'hôte. Le volume `atelier-data` conserve la base SQLite, les sessions, les invitations et les images. **Ne pas utiliser `docker compose down --volumes` pour une installation à conserver.**
+
+Voir [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md) pour les prérequis, la sauvegarde, la migration d'un serveur Node ou Docker V2 et le retour à une sauvegarde. Il faut garder le nom de projet Compose et le volume existants lors d'une mise à jour, ainsi que l'origine publique et les cookies pour conserver l'identité des visiteurs.
+
+L'application utilise **une seule instance serveur**. Plusieurs réplicas partageraient un fichier SQLite sans synchroniser leurs documents en mémoire ou leurs connexions WebSocket. Le site statique V1 sur ChatGPT Sites demande un déploiement distinct : publier seulement `dist/` n'active pas la collaboration.
+
+### Configuration
+
+Pour une installation Node classique :
 
 ```bash
 PORT=3000 DATA_DIR=./data PUBLIC_URL=https://board.example.com TRUST_PROXY=1 npm start
 ```
 
-Configurer `TRUST_PROXY=1` uniquement quand l'application est accessible au travers d'un proxy de confiance qui termine HTTPS. Le proxy doit transmettre `X-Forwarded-Proto` et les en-têtes `Upgrade`/`Connection` de WebSocket. Le serveur ne doit pas être directement exposé à côté de ce proxy.
+Configurer `TRUST_PROXY=1` uniquement derrière un proxy HTTPS de confiance, sans accès public direct au serveur Node. Le proxy doit transmettre `X-Forwarded-Proto` et les en-têtes WebSocket. Node ne charge pas automatiquement les fichiers `.env` : passer les variables au processus ou utiliser son option `--env-file`. Docker Compose utilise `.env` pour ses substitutions ; la recette HTTPS utilise explicitement `.env.production`.
 
 | Variable | Usage |
 | --- | --- |
-| `PORT` | Port HTTP du serveur Node, `3000` par défaut. Avec Compose, port publié sur l'hôte ; le conteneur écoute toujours sur `3000`. |
-| `HOST` | Adresse d'écoute, `0.0.0.0` par défaut. |
-| `DATA_DIR` | Répertoire persistant des données SQLite et images des projets, `./data` par défaut. |
-| `PUBLIC_URL` | Origine publique utilisée pour les invitations et le contrôle d'origine, par exemple `https://board.example.com`. |
-| `TRUST_PROXY` | `1` ou `true` derrière un proxy HTTPS de confiance ; `0` en accès HTTP local. |
-| `MAX_BOARDS_PER_GUEST` | Nombre maximal de projets créés et encore stockés par identité invitée, `20` par défaut. Rejoindre un projet ne consomme pas ce quota. |
-| `MAX_BOARD_STORAGE_MB` | Limite de données par projet : état Yjs complet et fichiers d'images, `100` par défaut. |
-| `MAX_TOTAL_STORAGE_MB` | Limite de ces données pour toute l'installation, `1024` par défaut. |
+| `PORT` | Port du serveur Node, `3000` par défaut. Avec Compose, port publié sur l'hôte ; le conteneur écoute sur `3000`. |
+| `HOST` | Adresse d'écoute Node, `0.0.0.0` par défaut. |
+| `DATA_DIR` | Données SQLite et images : `./data` avec Node, `/data` dans le volume Docker. |
+| `PUBLIC_URL` | Origine publique des invitations et du contrôle d'origine. La recette HTTPS la construit depuis `DOMAIN`. |
+| `TRUST_PROXY` | `1` ou `true` derrière un proxy HTTPS de confiance ; `0` en HTTP local. La recette Caddy fixe `1`. |
+| `DOMAIN` | Domaine public sans protocole ni chemin, pour la recette HTTPS. |
+| `MAX_BOARDS_PER_GUEST` | Projets créés et encore stockés par identité invitée, `20` par défaut. |
+| `MAX_BOARD_STORAGE_MB` | État Yjs complet et images par projet, `100` par défaut. |
+| `MAX_TOTAL_STORAGE_MB` | Ces mêmes données pour l'installation, `1024` par défaut. |
 
-Les quotas sont des entiers strictement positifs. Pour les deux variables de stockage, une unité vaut **1 048 576 octets (1 Mio)** : les valeurs par défaut sont donc 100 Mio par projet et 1 Gio pour l'installation. Une configuration invalide empêche le démarrage du serveur.
+Les quotas sont des entiers strictement positifs. Une unité de stockage vaut **1 048 576 octets (1 Mio)** : les valeurs par défaut sont 100 Mio par projet et 1 Gio au total. Une configuration invalide empêche le démarrage.
 
-Une recette Docker est fournie dans [Dockerfile](Dockerfile) et [docker-compose.yml](docker-compose.yml). Le volume `atelier-data` conserve les données après un redémarrage ou une recréation du conteneur. Les fichiers `.env` ne sont pas ajoutés à Git. Node ne les charge pas automatiquement : les passer via l'environnement du processus ou utiliser l'option Node `--env-file` ; Docker Compose lit `.env` pour ses substitutions.
+## Appliquer la V2.1 hors ligne sur une V2
+
+Télécharger une seule fois [releases/atelier-board-v2-to-v2.1.sh](releases/atelier-board-v2-to-v2.1.sh), puis transférer ce fichier vers la machine qui contient la V2. Il embarque les sources V2.1 : ni Git, ni Node, ni npm, ni accès réseau ne sont nécessaires pour appliquer les modifications.
+
+Arrêter l'application et sauvegarder ses données avant de l'utiliser :
 
 ```bash
-cp .env.example .env
-docker compose up --build -d
+bash atelier-board-v2-to-v2.1.sh --check /chemin/atelier-board
+bash atelier-board-v2-to-v2.1.sh /chemin/atelier-board
 ```
 
-La recette publie le port sur `127.0.0.1` pour un accès local ou un proxy installé sur le même hôte. Avant de la rendre publique, modifier `PUBLIC_URL` et `TRUST_PROXY` dans `.env` puis configurer le proxy HTTPS. Un proxy exécuté dans un autre conteneur peut joindre le service `atelier:3000` sur le même réseau Compose. Ne pas supprimer le volume avec `docker compose down --volumes` si les projets doivent être conservés.
+Le script accepte un projet `atelier-board` en version `2.0.x` ou déjà `2.1.0`, vérifie l'archive et crée une sauvegarde privée des sources remplacées à côté du projet. Il conserve les fichiers `.env` privés, `data/`, `node_modules/` et `.git/`. Il ne démarre aucun serveur et ne lance ni migration de base, ni installation de dépendances.
 
-Cette version utilise **une seule instance serveur**. Ne pas lancer plusieurs réplicas partageant le même fichier SQLite : leurs connexions WebSocket et documents en mémoire ne se synchronisent pas entre processus. Prévoir une architecture de coordination et de stockage adaptée avant une montée en charge horizontale.
+Si un fichier `SHA256SUMS` accompagne le script sur la page de version GitHub, le télécharger pour une vérification supplémentaire. Placer les deux fichiers dans le même dossier, puis lancer `sha256sum -c SHA256SUMS` depuis ce dossier. Le script reste autonome et contrôle également l'archive qu'il embarque.
+
+**Le mode hors ligne concerne la mise à jour du code.** Construire ou démarrer Docker peut ensuite demander Internet pour télécharger des images et des dépendances. Le script n'est pas une sauvegarde des projets, sessions et images : suivre la [procédure de déploiement et de sauvegarde](deploy/DEPLOYMENT.md).
+
+Pour régénérer le script depuis les sources V2.1, le mainteneur doit disposer de Git et Node.js. Le générateur utilise uniquement les fichiers de l'index Git, afin de laisser les fichiers locaux non suivis hors de l'archive. Indexer explicitement tout nouveau fichier source avant génération, par exemple avec `git add chemin/du/fichier`, puis :
+
+```bash
+npm run build:offline-update
+```
+
+Ces prérequis concernent la génération ; appliquer le script sur la machine de destination ne demande toujours ni Git ni Node.js.
+
+Les modifications de cette version sont résumées dans [CHANGELOG.md](CHANGELOG.md).
 
 ## Quotas de stockage
 
@@ -139,6 +179,8 @@ Les tests vérifient le store local, le modèle partagé et les échanges serveu
 | `dist/vendor/` | Yjs pour navigateur et licences associées. |
 | `dist/templates.js`, `dist/export.js` | Modèles et exports. |
 | `server.mjs`, `server/` | API, WebSocket, contrôle d'accès, SQLite et fichiers. |
+| `Dockerfile`, `docker-compose.yml`, `deploy/` | Conteneur, HTTPS et procédures de déploiement. |
+| `scripts/build-offline-update.mjs`, `releases/` | Construction et distribution du script autonome de mise à jour. |
 
 ## Licence
 

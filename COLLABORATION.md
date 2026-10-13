@@ -1,6 +1,6 @@
-# Collaboration — architecture de la V2
+# Collaboration — architecture de la V2.1
 
-La V2 conserve les tableaux locaux de la V1 et ajoute un mode partagé. Un projet partagé appartient au serveur ; les clients manipulent un document Yjs, échangent ses modifications par WebSocket et attendent un accusé de réception durable. Les invitations permettent de rejoindre un projet sans compte ni mot de passe.
+La V2.1 conserve les tableaux locaux de la V1 et le mode partagé de la V2 ; elle ajoute les recettes de déploiement conteneurisé et de mise à jour du code hors ligne. Un projet partagé appartient au serveur ; les clients manipulent un document Yjs, échangent ses modifications par WebSocket et attendent un accusé de réception durable. Les invitations permettent de rejoindre un projet sans compte ni mot de passe.
 
 ## Parcours et identité
 
@@ -55,6 +55,7 @@ Les réponses sont JSON, sauf les images et les fichiers de l'interface. Les req
 
 | Route | Fonction |
 | --- | --- |
+| `GET /api/health`, `HEAD /api/health` | Santé du processus et de sa connexion SQLite ; sans session, avec la version du serveur. |
 | `GET /api/session` | Disponibilité de la collaboration et identité courante. |
 | `POST /api/session` | Créer une identité invitée avec `{ name }`. |
 | `PATCH /api/session` | Modifier son nom avec `{ name }`. |
@@ -154,10 +155,14 @@ Ces quotas ne représentent pas la taille complète de `DATA_DIR` : ils n'inclue
 
 ## Déploiement et portée
 
-La V2 demande un processus Node.js 24 avec disque persistant et un proxy HTTPS compatible WebSocket. `PUBLIC_URL` doit désigner l'origine publique du site. `TRUST_PROXY` ne doit être activé que derrière un proxy de confiance, avec un accès direct au serveur fermé. Voir [README.md](README.md) et [.env.example](.env.example).
+La V2.1 demande un processus Node.js 24 avec disque persistant et un proxy HTTPS compatible WebSocket. `PUBLIC_URL` doit désigner l'origine publique du site. `TRUST_PROXY` ne doit être activé que derrière un proxy de confiance, avec un accès direct au serveur fermé. Voir [README.md](README.md), [.env.example](.env.example) et [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md).
 
 Cette implémentation fonctionne avec une seule instance serveur. Plusieurs processus n'ont pas de canal commun pour les documents en mémoire et les WebSockets. Une montée en charge horizontale demanderait un stockage et une coordination supplémentaires ; elle ne consiste pas à ajouter des réplicas sur le fichier SQLite actuel.
 
-Le site statique V1 ne sert pas ce serveur. ChatGPT Sites déploie son code serveur dans Cloudflare Workers et propose D1/R2 ; cette implémentation Node/SQLite ne s'y publie pas telle quelle. La livraison du code V2 ne modifie pas automatiquement l'application V1 en ligne.
+Le site statique V1 ne sert pas ce serveur. ChatGPT Sites déploie son code serveur dans Cloudflare Workers et propose D1/R2 ; cette implémentation Node/SQLite ne s'y publie pas telle quelle. La livraison du code V2.1 ne modifie pas automatiquement l'application V1 en ligne.
 
 La sauvegarde serveur doit inclure la base et les images. Arrêter le processus puis copier `DATA_DIR` fournit une sauvegarde cohérente de cette installation. Les exports JSON servent à transporter des tableaux ; les identités, invitations et droits restent des données du serveur.
+
+La recette Docker exécute le serveur avec l'utilisateur `node` (UID/GID 1000), un système de fichiers applicatif en lecture seule et un volume `/data` modifiable. Le contrôle de santé consulte SQLite sans créer d'identité ni transmettre de cookie. La recette HTTPS ajoute Caddy sur le même réseau ; le port Node n'est alors pas publié sur l'hôte. Le journal et les images restent dans le volume `atelier-data`, pas dans l'image.
+
+Le script `releases/atelier-board-v2-to-v2.1.sh` remplace uniquement les sources qu'il embarque. Il fonctionne sans réseau, sans Git et sans Node, sauvegarde les fichiers remplacés et préserve les données et les fichiers `.env` privés. Il ne démarre pas l'application : les migrations SQLite éventuelles s'exécutent seulement au prochain démarrage du serveur. Revenir aux anciennes sources n'annule pas une migration ; pour un retour complet, arrêter le serveur et restaurer la sauvegarde de données correspondante. Les images Docker et dépendances npm ne sont pas intégrées à ce script.

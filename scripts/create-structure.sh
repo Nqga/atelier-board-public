@@ -44,7 +44,9 @@ while IFS= read -r relative_path; do
 done <<'FILES'
 .dockerignore
 .env.example
+.env.production.example
 .gitignore
+CHANGELOG.md
 COLLABORATION.md
 Dockerfile
 LICENSE
@@ -65,17 +67,24 @@ dist/templates.js
 dist/vendor/LICENSES.txt
 dist/vendor/yjs.js
 docker-compose.yml
+deploy/Caddyfile
+deploy/DEPLOYMENT.md
+deploy/compose.https.yml
 package-lock.json
 package.json
+releases/atelier-board-v2-to-v2.1.sh
+scripts/build-offline-update.mjs
 scripts/build-vendor.mjs
 scripts/check.mjs
 scripts/create-structure.sh
+scripts/offline-update.template.sh
 server.mjs
 server/atelier-server.mjs
 server/database.mjs
 server/quotas.mjs
 server/security.mjs
 tests/quotas.test.mjs
+tests/offline-update.test.mjs
 tests/server.test.mjs
 tests/shared-store.test.mjs
 tests/store.test.mjs

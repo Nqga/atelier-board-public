@@ -1,6 +1,12 @@
 # syntax=docker/dockerfile:1
 FROM node:24-alpine
 
+LABEL org.opencontainers.image.title="Atelier Board" \
+      org.opencontainers.image.description="Tableau visuel collaboratif web" \
+      org.opencontainers.image.version="2.1.0" \
+      org.opencontainers.image.source="https://github.com/Nqga/atelier-board-public" \
+      org.opencontainers.image.licenses="MIT"
+
 WORKDIR /app
 COPY --chown=node:node package.json package-lock.json ./
 
@@ -23,4 +29,6 @@ USER node
 ENV NODE_ENV=production PORT=3000 HOST=0.0.0.0 DATA_DIR=/data
 EXPOSE 3000
 VOLUME ["/data"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/api/health', {signal: AbortSignal.timeout(4000)}).then(async r => {if (!r.ok || (await r.json()).status !== 'ok') process.exit(1);}).catch(() => process.exit(1))"
 CMD ["node", "server.mjs"]

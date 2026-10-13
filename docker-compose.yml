@@ -1,9 +1,17 @@
 services:
   atelier:
+    image: atelier-board:2.1.0
     build: .
     restart: unless-stopped
     init: true
     stop_grace_period: 20s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     ports:
       - "127.0.0.1:${PORT:-3000}:3000"
     environment:
@@ -18,6 +26,12 @@ services:
       MAX_TOTAL_STORAGE_MB: ${MAX_TOTAL_STORAGE_MB:-1024}
     volumes:
       - atelier-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health', {signal: AbortSignal.timeout(4000)}).then(async r => {if (!r.ok || (await r.json()).status !== 'ok') process.exit(1);}).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
 
 volumes:
   atelier-data:
